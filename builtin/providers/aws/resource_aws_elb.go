@@ -231,10 +231,11 @@ func resourceAwsElbCreate(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
-	return resourceAwsElbUpdate(d, meta)
+	return resourcePostConfig(d, meta)
 }
 
 func resourceAwsElbRead(d *schema.ResourceData, meta interface{}) error {
+	log.Printf("\n@@@@@@\nEntering READ\n@@@@@@\n")
 	elbconn := meta.(*AWSClient).elbconn
 
 	// Retrieve the ELB properties for updating the state
@@ -263,9 +264,14 @@ func resourceAwsElbRead(d *schema.ResourceData, meta interface{}) error {
 	d.Set("internal", *lb.Scheme == "internal")
 	d.Set("availability_zones", lb.AvailabilityZones)
 	d.Set("instances", flattenInstances(lb.Instances))
-	d.Set("listener", flattenListeners(lb.ListenerDescriptions))
 	d.Set("security_groups", lb.SecurityGroups)
 	d.Set("subnets", lb.Subnets)
+
+	list := make([]elb.Listener, 0, len(lb.ListenerDescriptions))
+	for _, ld := range lb.ListenerDescriptions {
+		list = append(list, *ld.Listener)
+	}
+	d.Set("listener", flattenListeners(list))
 
 	// There's only one health check, so save that to state as we
 	// currently can
@@ -273,10 +279,12 @@ func resourceAwsElbRead(d *schema.ResourceData, meta interface{}) error {
 		d.Set("health_check", flattenHealthCheck(lb.HealthCheck))
 	}
 
+	log.Printf("\n@@@@@@\nLeaving READ\n@@@@@@\n")
 	return nil
 }
 
-func resourceAwsElbUpdate(d *schema.ResourceData, meta interface{}) error {
+func resourcePostConfig(d *schema.ResourceData, meta interface{}) error {
+	log.Printf("\n@@@@@@\nEntering post config\n@@@@@@\n")
 	elbconn := meta.(*AWSClient).elbconn
 
 	d.Partial(true)
@@ -356,10 +364,63 @@ func resourceAwsElbUpdate(d *schema.ResourceData, meta interface{}) error {
 			d.SetPartial("health_check")
 		}
 	}
+	d.Partial(false)
+
+	log.Printf("\n@@@@@@\nLeaving post config\n@@@@@@\n")
+	return resourceAwsElbRead(d, meta)
+}
+
+func resourceAwsElbUpdate(d *schema.ResourceData, meta interface{}) error {
+	log.Printf("\n@@@@@@\nEntering Update\n@@@@@@\n")
+	elbconn := meta.(*AWSClient).elbconn
+
+	d.Partial(true)
+	if d.HasChange("listener") {
+		// in order to update listeners, we need to first delete any listener
+		// associated with the port.
+		oldListeners, _ := d.GetChange("listener")
+		oldLbPorts := make([]aws.IntegerValue, 0, oldListeners.(*schema.Set).Len())
+		for _, lb := range oldListeners.(*schema.Set).List() {
+			lbMap := lb.(map[string]interface{})
+			// oldLbPorts[i] = lbMap["lb_port"].(int)
+			oldLbPorts = append(oldLbPorts, aws.Integer(lbMap["lb_port"].(int)))
+		}
+
+		log.Printf("\n***\nOld ports:%#v\n***\n", oldLbPorts)
+
+		dReq := &elb.DeleteLoadBalancerListenerInput{
+			LoadBalancerName:  aws.String(d.Get("name").(string)),
+			LoadBalancerPorts: oldLbPorts,
+		}
+		log.Printf("\n***\nmark 1\n***\n")
+		_, err := elbconn.DeleteLoadBalancerListeners(dReq)
+		if err != nil {
+			return fmt.Errorf("Failure deleting old listeners: %s", err)
+		}
+		log.Printf("\n***\nmark 2\n***\n")
+
+		// build a list of new listener(s)
+		listeners, err := expandListeners(d.Get("listener").(*schema.Set).List())
+		if err != nil {
+			return fmt.Errorf("Failure expanding listeners: %s", err)
+		}
+		log.Printf("\n***\nmark 3\n***\n")
+		cReq := &elb.CreateLoadBalancerListenerInput{
+			LoadBalancerName: aws.String(d.Get("name").(string)),
+			Listeners:        listeners,
+		}
+		log.Printf("\n***\nmark 4\n***\n")
+		_, err = elbconn.CreateLoadBalancerListeners(cReq)
+		if err != nil {
+			return fmt.Errorf("Failure creating Load Balancer listeners: %s", err)
+		}
+		log.Printf("\n***\nmark 5\n***\n")
+	}
 
 	d.Partial(false)
 
-	return resourceAwsElbRead(d, meta)
+	log.Printf("\n@@@@@@\nLeaving Update\n@@@@@@\n")
+	return resourcePostConfig(d, meta)
 }
 
 func resourceAwsElbDelete(d *schema.ResourceData, meta interface{}) error {

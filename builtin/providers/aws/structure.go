@@ -168,18 +168,18 @@ func expandInstanceString(list []interface{}) []elb.Instance {
 }
 
 // Flattens an array of Listeners into a []map[string]interface{}
-func flattenListeners(list []elb.ListenerDescription) []map[string]interface{} {
+func flattenListeners(list []elb.Listener) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(list))
 	for _, i := range list {
 		l := map[string]interface{}{
-			"instance_port":     *i.Listener.InstancePort,
-			"instance_protocol": strings.ToLower(*i.Listener.InstanceProtocol),
-			"lb_port":           *i.Listener.LoadBalancerPort,
-			"lb_protocol":       strings.ToLower(*i.Listener.Protocol),
+			"instance_port":     *i.InstancePort,
+			"instance_protocol": strings.ToLower(*i.InstanceProtocol),
+			"lb_port":           *i.LoadBalancerPort,
+			"lb_protocol":       strings.ToLower(*i.Protocol),
 		}
 		// SSLCertificateID is optional, and may be nil
-		if i.Listener.SSLCertificateID != nil {
-			l["ssl_certificate_id"] = *i.Listener.SSLCertificateID
+		if i.SSLCertificateID != nil {
+			l["ssl_certificate_id"] = *i.SSLCertificateID
 		}
 		result = append(result, l)
 	}

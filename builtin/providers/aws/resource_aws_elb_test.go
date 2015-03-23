@@ -7,6 +7,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/aws-sdk-go/aws"
 	"github.com/hashicorp/aws-sdk-go/gen/elb"
 	"github.com/hashicorp/terraform/helper/resource"
@@ -142,6 +143,34 @@ func TestAccAWSELBUpdate_HealthCheck(t *testing.T) {
 	})
 }
 
+func TestAccAWSELBUpdate_Listener(t *testing.T) {
+	var conf elb.LoadBalancerDescription
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSELBDestroy,
+		Steps: []resource.TestStep{
+			resource.TestStep{
+				Config: testAccAWSELBConfigHealthCheck,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSELBExists("aws_elb.bar", &conf),
+					resource.TestCheckResourceAttr(
+						"aws_elb.bar", "listener.206423021.instance_port", "8000"),
+				),
+			},
+			resource.TestStep{
+				Config: testAccAWSELBConfigHealthCheck_update,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSELBExists("aws_elb.bar", &conf),
+					testAccCheckAWSELBAttributesListener(&conf),
+					resource.TestCheckResourceAttr(
+						"aws_elb.bar", "listener.3931999347.instance_port", "8080"),
+				),
+			},
+		},
+	})
+}
+
 func testAccCheckAWSELBDestroy(s *terraform.State) error {
 	conn := testAccProvider.Meta().(*AWSClient).elbconn
 
@@ -238,6 +267,38 @@ func testAccCheckAWSELBAttributesHealthCheck(conf *elb.LoadBalancerDescription) 
 
 		if *conf.DNSName == "" {
 			return fmt.Errorf("empty dns_name")
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckAWSELBAttributesListener(conf *elb.LoadBalancerDescription) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		if *conf.LoadBalancerName != "foobar-terraform-test" {
+			return fmt.Errorf("bad name")
+		}
+
+		if len(conf.ListenerDescriptions) != 1 {
+			return fmt.Errorf("bad listener count")
+		}
+
+		l := conf.ListenerDescriptions[0].Listener
+
+		// AWS returns InstanceProtocol and Protocol as UPPERCASE
+		tl := &elb.Listener{
+			InstancePort:     aws.Integer(8010),
+			InstanceProtocol: aws.String("HTTP"),
+			LoadBalancerPort: aws.Integer(80),
+			Protocol:         aws.String("HTTP"),
+		}
+
+		if !reflect.DeepEqual(l, tl) {
+			return fmt.Errorf(
+				"Got:\n\n%#v\n\nExpected:\n\n%#v\n\n******\n%s\n\n****",
+				l,
+				tl,
+				spew.Sdump(l, tl))
 		}
 
 		return nil
@@ -357,7 +418,7 @@ resource "aws_elb" "bar" {
   availability_zones = ["us-west-2a"]
 
   listener {
-    instance_port = 8000
+    instance_port = 8080
     instance_protocol = "http"
     lb_port = 80
     lb_protocol = "http"
