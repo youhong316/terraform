@@ -19,7 +19,6 @@ func TestAccConsulKeys(t *testing.T) {
 				Config: testAccConsulKeysConfig,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckConsulKeysExists(),
-					testAccCheckConsulKeysValue("consul_keys.app", "time", "<any>"),
 					testAccCheckConsulKeysValue("consul_keys.app", "enabled", "true"),
 					testAccCheckConsulKeysValue("consul_keys.app", "set", "acceptance"),
 				),
