@@ -291,6 +291,17 @@ const testTerraformApplyCountTaintedStr = `
 <no state>
 `
 
+const testTerraformApplyCountDependsStr = `
+aws_instance.foo.0:
+  ID = foo
+  foo = foo
+  type = aws_instance
+aws_instance.foo.1:
+  ID = foo
+  foo = foo
+  type = aws_instance
+`
+
 const testTerraformApplyCountVariableStr = `
 aws_instance.foo.0:
   ID = foo

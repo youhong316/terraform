@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/hashicorp/terraform/config"
@@ -270,6 +271,7 @@ func (n *GraphNodeConfigResource) DependentOn() []string {
 			}
 		}
 		for _, v := range p.RawConfig.Variables {
+			log.Printf("[PAUL] [%s] CHECKING FOR DEPENDENT ON: %#v", n.Resource.Id(), varNameForVar(v))
 			if vn := varNameForVar(v); vn != "" && vn != n.Resource.Id() {
 				result = append(result, vn)
 			}
