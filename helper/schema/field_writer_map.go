@@ -157,6 +157,7 @@ func (w *MapFieldWriter) setMap(
 	if len(vs) == 0 {
 		// The empty string here means the map is removed.
 		w.result[k] = ""
+		w.result[k+".#"] = "0"
 		return nil
 	}
 

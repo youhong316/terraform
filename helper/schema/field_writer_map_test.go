@@ -159,10 +159,11 @@ func TestMapFieldWriter(t *testing.T) {
 
 		"map delete": {
 			[]string{"map"},
-			nil,
+			map[string]interface{}{},
 			false,
 			map[string]string{
-				"map": "",
+				"map.#": "0",
+				"map":   "",
 			},
 		},
 

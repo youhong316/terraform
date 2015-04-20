@@ -2512,7 +2512,9 @@ func TestResourceDataState(t *testing.T) {
 			},
 
 			Result: &terraform.InstanceState{
-				Attributes: map[string]string{},
+				Attributes: map[string]string{
+					"tags.#": "0",
+				},
 			},
 		},
 

@@ -13,6 +13,7 @@ package schema
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"reflect"
 	"sort"
@@ -633,6 +634,9 @@ func (m schemaMap) diffMap(
 	if err := mapstructure.WeakDecode(n, &configMap); err != nil {
 		return fmt.Errorf("%s: %s", k, err)
 	}
+
+	log.Printf("configMap: %#v", configMap)
+	log.Printf("stateMap: %#v", stateMap)
 
 	// Delete any count values, since we don't use those
 	delete(configMap, "#")
