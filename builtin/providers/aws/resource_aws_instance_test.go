@@ -2,6 +2,7 @@ package aws
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"testing"
 
@@ -339,13 +340,54 @@ func TestAccAWSInstance_tags(t *testing.T) {
 					testAccCheckTagsSDK(&v.Tags, "#", ""),
 				),
 			},
-
 			resource.TestStep{
 				Config: testAccCheckInstanceConfigTagsUpdate,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckInstanceExists("aws_instance.foo", &v),
 					testAccCheckTagsSDK(&v.Tags, "foo", ""),
-					testAccCheckTagsSDK(&v.Tags, "bar", "baz"),
+					testAccCheckTagsSDK(&v.Tags, "drift", ""),
+				),
+			},
+		},
+	})
+}
+
+func TestAccAWSInstance_tagDrift(t *testing.T) {
+	var v ec2.Instance
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckInstanceDestroy,
+		Steps: []resource.TestStep{
+			resource.TestStep{
+				Config: testAccInstanceConfig_tagDrift,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckInstanceExists("aws_instance.foo", &v),
+				),
+			},
+			resource.TestStep{
+				RunFunc: func(s *terraform.State) error {
+					conn := testAccProvider.Meta().(*AWSClient).ec2conn
+					tagKey := "drift"
+					tagValue := "it happens!"
+					tag := &ec2.Tag{Key: &tagKey, Value: &tagValue}
+					resp, err := conn.CreateTags(&ec2.CreateTagsInput{
+						Resources: []*string{v.InstanceID},
+						Tags:      []*ec2.Tag{tag},
+					})
+					if err != nil {
+						return err
+					}
+					log.Printf("[DEBUG] Drifted tags: %#v", resp)
+					return nil
+				},
+			},
+			resource.TestStep{
+				Config: testAccInstanceConfig_tagDrift2,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckInstanceExists("aws_instance.foo", &v),
+					testAccCheckTagsSDK(&v.Tags, "drift", ""),
 				),
 			},
 		},
@@ -549,6 +591,26 @@ resource "aws_instance" "foo" {
 	instance_type = "m1.small"
 	security_groups = ["${aws_security_group.tf_test_foo.name}"]
 	user_data = "foo:-with-character's"
+}
+`
+
+const testAccInstanceConfig_tagDrift = `
+resource "aws_instance" "foo" {
+	# us-west-2
+	ami = "ami-4fccb37f"
+	availability_zone = "us-west-2a"
+
+	instance_type = "m1.small"
+}
+`
+const testAccInstanceConfig_tagDrift2 = `
+resource "aws_instance" "foo" {
+	# us-west-2
+	ami = "ami-4fccb37f"
+	# update here
+	availability_zone = "us-west-2b"
+
+	instance_type = "m1.small"
 }
 `
 

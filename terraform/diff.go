@@ -424,6 +424,12 @@ func (d *InstanceDiff) Same(d2 *InstanceDiff) (bool, string) {
 				continue
 			}
 
+			// If we have come upon a collection, we may remove it from the sameness
+			// consideration under certain conditions where we expect the apply diff
+			// to be unpopulated, namely: if it's a computed set, or if the resource
+			// is being replaced.
+			skippableCollection := strings.HasSuffix(k, ".#") && (diffOld.NewComputed || d.RequiresNew())
+
 			// No exact match, but maybe this is a set containing computed
 			// values. So check if there is an approximate hash in the key
 			// and if so, try to match the key.
@@ -445,9 +451,9 @@ func (d *InstanceDiff) Same(d2 *InstanceDiff) (bool, string) {
 					if re.MatchString(k2) {
 						delete(checkNew, k2)
 
-						if diffOld.NewComputed && strings.HasSuffix(k, ".#") {
-							// This is a computed list or set, so remove any keys with this
-							// prefix from the check list.
+						if skippableCollection {
+							// We expect this collection to be different, and that's okay, so
+							// remove all keys with its prefix from the checklist.
 							prefix := k2[:len(k2)-1]
 							for k2, _ := range checkNew {
 								if strings.HasPrefix(k2, prefix) {
@@ -461,12 +467,8 @@ func (d *InstanceDiff) Same(d2 *InstanceDiff) (bool, string) {
 				}
 			}
 
-			// This is a little tricky, but when a diff contains a computed list
-			// or set that can only be interpolated after the apply command has
-			// created the dependant resources, it could turn out that the result
-			// is actually the same as the existing state which would remove the
-			// key from the diff.
-			if diffOld.NewComputed && strings.HasSuffix(k, ".#") {
+			// See note above about skippableCollection
+			if skippableCollection {
 				ok = true
 			}
 

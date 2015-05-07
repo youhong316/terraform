@@ -2348,6 +2348,45 @@ func TestSchemaMap_Diff(t *testing.T) {
 
 			Err: false,
 		},
+		{
+			Schema: map[string]*Schema{
+				"availability_zone": &Schema{
+					Required: true,
+					ForceNew: true,
+					Type:     TypeString,
+				},
+				"tags": &Schema{
+					Optional: true,
+					Type:     TypeMap,
+				},
+			},
+
+			Config: map[string]interface{}{
+				"availability_zone": "us-east-1b",
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"availability_zone": "us-east-1a",
+					"tags.#":            "1",
+					"tags.drift":        "happens",
+				},
+			},
+
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"availability_zone": &terraform.ResourceAttrDiff{
+						Old: "us-east-1a", New: "us-east-1b", RequiresNew: true,
+					},
+					"tags.#": &terraform.ResourceAttrDiff{Old: "1", New: "0"},
+					"tags.drift": &terraform.ResourceAttrDiff{
+						Old: "happens", New: "", NewRemoved: true,
+					},
+				},
+			},
+
+			Err: false,
+		},
 	}
 
 	for i, tc := range cases {

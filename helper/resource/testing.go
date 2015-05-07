@@ -60,6 +60,11 @@ type TestCase struct {
 // potentially complex update logic. In general, simply create/destroy
 // tests will only need one step.
 type TestStep struct {
+	// If provided, this function is run instead of the normal test step
+	// mechanics. Useful for simulating arbitrary real-world behavior between
+	// steps.
+	RunFunc func(s *terraform.State) error
+
 	// Config a string of the configuration to give to Terraform.
 	Config string
 
@@ -166,6 +171,12 @@ func testStep(
 	opts terraform.ContextOpts,
 	state *terraform.State,
 	step TestStep) (*terraform.State, error) {
+	// If RunFunc is provided, it overrides all other behavior, so we just run it
+	// and continue.
+	if step.RunFunc != nil {
+		return state, step.RunFunc(state)
+	}
+
 	cfgPath, err := ioutil.TempDir("", "tf-test")
 	if err != nil {
 		return state, fmt.Errorf(
