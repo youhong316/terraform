@@ -16,6 +16,8 @@ type PlanCommand struct {
 }
 
 func (c *PlanCommand) Run(args []string) int {
+	defer c.Meta.Close()
+
 	var destroy, refresh, detailed bool
 	var outPath string
 	var moduleDepth int

@@ -43,8 +43,10 @@ type Meta struct {
 	// Targets for this context (private)
 	targets []string
 
-	color bool
-	oldUi cli.Ui
+	// Private values that should not be set
+	color     bool
+	oldUi     cli.Ui
+	uiHookVal UiHook
 
 	// The fields below are expected to be set by the command via
 	// command line flags. See the Apply command for an example.
@@ -77,6 +79,18 @@ func (m *Meta) initStatePaths() {
 	if m.backupPath == "" {
 		m.backupPath = m.stateOutPath + DefaultBackupExtention
 	}
+}
+
+// Close should be called by every command as a `defer` to clean up
+// the CLI. The error value can be ignored since this will output to
+// the CLI if there was an error. The error value is returned only so that
+// Meta implements the Closer interface for Go.
+func (m *Meta) Close() error {
+	if m.uiHookVal != nil {
+		m.uiHookVal.Close()
+	}
+
+	return nil
 }
 
 // StateOutPath returns the true output path for the state file
@@ -395,16 +409,31 @@ func (m *Meta) process(args []string, vars bool) []string {
 }
 
 // uiHook returns the UiHook to use with the context.
-func (m *Meta) uiHook() terraform.Hook {
-	switch m.flagUi {
-	case "simple":
-		fallthrough
-	default:
-		return &UiHookSimple{
-			Colorize: m.Colorize(),
-			Ui:       m.Ui,
+func (m *Meta) uiHook() UiHook {
+	if m.uiHookVal == nil {
+		switch m.flagUi {
+		case "fancy":
+			m.uiHookVal = &UiHookFancy{}
+		case "simple":
+			fallthrough
+		default:
+			m.uiHookVal = &UiHookSimple{
+				Colorize: m.Colorize(),
+				Ui:       m.Ui,
+			}
+		}
+
+		// Initialize the hook.
+		if err := m.uiHookVal.Init(); err != nil {
+			m.Ui.Error(fmt.Sprintf(
+				"Error initializing UI: %s\n\n"+
+					"UI output may not work. If there is no UI output, the safest\n"+
+					"thing to do is wait for Terraform to complete running, and then\n"+
+					"resolve the issue.", err))
 		}
 	}
+
+	return m.uiHookVal
 }
 
 const (

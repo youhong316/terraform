@@ -14,6 +14,8 @@ type RefreshCommand struct {
 }
 
 func (c *RefreshCommand) Run(args []string) int {
+	defer c.Meta.Close()
+
 	args = c.Meta.process(args, true)
 
 	cmdFlags := c.Meta.flagSet("refresh")

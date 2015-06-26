@@ -16,6 +16,8 @@ type GraphCommand struct {
 }
 
 func (c *GraphCommand) Run(args []string) int {
+	defer c.Meta.Close()
+
 	var moduleDepth int
 	var verbose bool
 	var drawCycles bool

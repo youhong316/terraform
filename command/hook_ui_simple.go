@@ -35,6 +35,10 @@ const (
 	uiResourceDestroy
 )
 
+// Init and Close are unused for the simple UI.
+func (h *UiHookSimple) Init() error  { return nil }
+func (h *UiHookSimple) Close() error { return nil }
+
 func (h *UiHookSimple) PreApply(
 	n *terraform.InstanceInfo,
 	s *terraform.InstanceState,
