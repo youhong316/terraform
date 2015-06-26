@@ -14,7 +14,7 @@ import (
 	"github.com/mitchellh/colorstring"
 )
 
-type UiHook struct {
+type UiHookSimple struct {
 	terraform.NilHook
 
 	Colorize *colorstring.Colorize
@@ -35,7 +35,7 @@ const (
 	uiResourceDestroy
 )
 
-func (h *UiHook) PreApply(
+func (h *UiHookSimple) PreApply(
 	n *terraform.InstanceInfo,
 	s *terraform.InstanceState,
 	d *terraform.InstanceDiff) (terraform.HookAction, error) {
@@ -116,7 +116,7 @@ func (h *UiHook) PreApply(
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) PostApply(
+func (h *UiHookSimple) PostApply(
 	n *terraform.InstanceInfo,
 	s *terraform.InstanceState,
 	applyerr error) (terraform.HookAction, error) {
@@ -150,13 +150,13 @@ func (h *UiHook) PostApply(
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) PreDiff(
+func (h *UiHookSimple) PreDiff(
 	n *terraform.InstanceInfo,
 	s *terraform.InstanceState) (terraform.HookAction, error) {
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) PreProvision(
+func (h *UiHookSimple) PreProvision(
 	n *terraform.InstanceInfo,
 	provId string) (terraform.HookAction, error) {
 	id := n.HumanId()
@@ -166,7 +166,7 @@ func (h *UiHook) PreProvision(
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) ProvisionOutput(
+func (h *UiHookSimple) ProvisionOutput(
 	n *terraform.InstanceInfo,
 	provId string,
 	msg string) {
@@ -187,7 +187,7 @@ func (h *UiHook) ProvisionOutput(
 	h.ui.Output(strings.TrimSpace(buf.String()))
 }
 
-func (h *UiHook) PreRefresh(
+func (h *UiHookSimple) PreRefresh(
 	n *terraform.InstanceInfo,
 	s *terraform.InstanceState) (terraform.HookAction, error) {
 	h.once.Do(h.init)
@@ -199,7 +199,7 @@ func (h *UiHook) PreRefresh(
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) init() {
+func (h *UiHookSimple) init() {
 	if h.Colorize == nil {
 		panic("colorize not given")
 	}

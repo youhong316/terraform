@@ -33,11 +33,12 @@ type Meta struct {
 	// This can be set by tests to change some directories
 	dataDir string
 
-	// Variables for the context (private)
+	// Variables for the context, set via flags (private)
 	autoKey       string
 	autoVariables map[string]string
 	input         bool
 	variables     map[string]string
+	flagUi        string
 
 	// Targets for this context (private)
 	targets []string
@@ -299,6 +300,7 @@ func (m *Meta) contextOpts() *terraform.ContextOpts {
 func (m *Meta) flagSet(n string) *flag.FlagSet {
 	f := flag.NewFlagSet(n, flag.ContinueOnError)
 	f.BoolVar(&m.input, "input", true, "input")
+	f.StringVar(&m.flagUi, "ui", "simple", "")
 	f.Var((*FlagKV)(&m.variables), "var", "variables")
 	f.Var((*FlagKVFile)(&m.variables), "var-file", "variable file")
 	f.Var((*FlagStringSlice)(&m.targets), "target", "resource to target")
@@ -393,10 +395,15 @@ func (m *Meta) process(args []string, vars bool) []string {
 }
 
 // uiHook returns the UiHook to use with the context.
-func (m *Meta) uiHook() *UiHook {
-	return &UiHook{
-		Colorize: m.Colorize(),
-		Ui:       m.Ui,
+func (m *Meta) uiHook() terraform.Hook {
+	switch m.flagUi {
+	case "simple":
+		fallthrough
+	default:
+		return &UiHookSimple{
+			Colorize: m.Colorize(),
+			Ui:       m.Ui,
+		}
 	}
 }
 
