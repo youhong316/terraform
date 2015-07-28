@@ -83,7 +83,8 @@ func Provider() terraform.ResourceProvider {
 						return credVal.AccessKeyID
 					})
 				},
-				Description: descriptions["access_key"],
+				Description:  descriptions["access_key"],
+				ValidateFunc: validateAccessKey,
 			},
 
 			"secret_key": &schema.Schema{
@@ -263,4 +264,9 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 	}
 
 	return config.Client()
+}
+
+func validateAccessKey(v interface{}, k string) (ws []string, errors []error) {
+	ws = append(ws, "this is a warning")
+	return
 }
