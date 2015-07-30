@@ -58,19 +58,6 @@ func (n *GraphNodeConfigProvider) ProviderConfig() *config.RawConfig {
 	return n.Provider.RawConfig
 }
 
-// GraphNodeDotter impl.
-func (n *GraphNodeConfigProvider) DotNode(name string, opts *GraphDotOpts) *dot.Node {
-	return dot.NewNode(name, map[string]string{
-		"label": n.Name(),
-		"shape": "diamond",
-	})
-}
-
-// GraphNodeDotterOrigin impl.
-func (n *GraphNodeConfigProvider) DotOrigin() bool {
-	return true
-}
-
 // GraphNodeFlattenable impl.
 func (n *GraphNodeConfigProvider) Flatten(p []string) (dag.Vertex, error) {
 	return &GraphNodeConfigProviderFlat{
@@ -122,6 +109,19 @@ func (n *GraphNodeConfigProviderFlat) DependentOn() []string {
 	}
 
 	return result
+}
+
+// GraphNodeDotter impl.
+func (n *GraphNodeConfigProviderFlat) DotNode(name string, opts *GraphDotOpts) *dot.Node {
+	return dot.NewNode(name, map[string]string{
+		"label": n.Name(),
+		"shape": "diamond",
+	})
+}
+
+// GraphNodeDotterOrigin impl.
+func (n *GraphNodeConfigProviderFlat) DotOrigin() bool {
+	return true
 }
 
 func (n *GraphNodeConfigProviderFlat) ProviderName() string {

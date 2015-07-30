@@ -5,6 +5,7 @@ import (
 
 	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/dag"
+	"github.com/hashicorp/terraform/dot"
 )
 
 // GraphNodeConfigOutput represents an output configured within the
@@ -101,4 +102,15 @@ func (n *GraphNodeConfigOutputFlat) DependentOn() []string {
 	return modulePrefixList(
 		n.GraphNodeConfigOutput.DependentOn(),
 		prefix)
+}
+
+// GraphNodeDotter impl.
+func (n *GraphNodeConfigOutputFlat) DotNode(name string, opts *GraphDotOpts) *dot.Node {
+	return dot.NewNode(name, map[string]string{
+		"label":     n.Name(),
+		"shape":     "invhouse",
+		"style":     "filled",
+		"fillcolor": "#FFB2B2",
+		"fontname":  "courier",
+	})
 }

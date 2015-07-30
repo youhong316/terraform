@@ -5,6 +5,7 @@ import (
 
 	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/dag"
+	"github.com/hashicorp/terraform/dot"
 )
 
 // GraphNodeConfigVariable represents a Variable in the config.
@@ -168,6 +169,33 @@ func (n *GraphNodeConfigVariableFlat) DependentOn() []string {
 	return modulePrefixList(
 		n.GraphNodeConfigVariable.DependentOn(),
 		prefix)
+}
+
+// GraphNodeDotter impl.
+func (n *GraphNodeConfigVariable) DotNode(name string, opts *GraphDotOpts) *dot.Node {
+	return dot.NewNode(name, map[string]string{
+		"label":     n.Name(),
+		"shape":     "house",
+		"style":     "filled",
+		"fillcolor": "#CCFFEB",
+		"fontname":  "courier",
+	})
+}
+
+// GraphNodeDotterOrigin impl.
+func (n *GraphNodeConfigVariable) DotOrigin() bool {
+	return true
+}
+
+// GraphNodeDotter impl.
+func (n *GraphNodeConfigVariableFlat) DotNode(name string, opts *GraphDotOpts) *dot.Node {
+	return dot.NewNode(name, map[string]string{
+		"label":     n.Name(),
+		"shape":     "house",
+		"style":     "filled",
+		"fillcolor": "#CCFFEB",
+		"fontname":  "courier",
+	})
 }
 
 func (n *GraphNodeConfigVariableFlat) Path() []string {

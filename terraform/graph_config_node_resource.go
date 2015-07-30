@@ -123,8 +123,11 @@ func (n *GraphNodeConfigResource) DotNode(name string, opts *GraphDotOpts) *dot.
 		return nil
 	}
 	return dot.NewNode(name, map[string]string{
-		"label": n.Name(),
-		"shape": "box",
+		"label":     n.Name(),
+		"shape":     "box",
+		"style":     "filled",
+		"fillcolor": "#CC80FF",
+		"fontname":  "courier",
 	})
 }
 
@@ -311,6 +314,19 @@ func (n *GraphNodeConfigResourceFlat) DependentOn() []string {
 	return modulePrefixList(
 		n.GraphNodeConfigResource.DependentOn(),
 		prefix)
+}
+
+func (n *GraphNodeConfigResourceFlat) DotNode(name string, opts *GraphDotOpts) *dot.Node {
+	if n.DestroyMode != DestroyNone && !opts.Verbose {
+		return nil
+	}
+	return dot.NewNode(name, map[string]string{
+		"label":     n.Name(),
+		"shape":     "box",
+		"style":     "filled",
+		"fillcolor": "#CC80FF",
+		"fontname":  "courier",
+	})
 }
 
 func (n *GraphNodeConfigResourceFlat) ProvidedBy() []string {

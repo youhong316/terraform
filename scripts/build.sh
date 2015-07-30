@@ -18,6 +18,9 @@ GIT_DIRTY=$(test -n "`git status --porcelain`" && echo "+CHANGES" || true)
 XC_ARCH=${XC_ARCH:-"386 amd64 arm"}
 XC_OS=${XC_OS:-linux darwin windows freebsd openbsd}
 
+# Build all by default, but can be overridden for targeted builds during dev
+TF_PKGS=${TF_PKGS:-./...}
+
 # Get dependencies unless running in quick mode
 if [ "${TF_QUICKDEV}x" == "x" ]; then
     echo "==> Getting dependencies..."
@@ -43,7 +46,7 @@ gox \
     -arch="${XC_ARCH}" \
     -ldflags "-X main.GitCommit ${GIT_COMMIT}${GIT_DIRTY}" \
     -output "pkg/{{.OS}}_{{.Arch}}/terraform-{{.Dir}}" \
-    ./...
+    ${TF_PKGS}
 
 # Make sure "terraform-terraform" is renamed properly
 for PLATFORM in $(find ./pkg -mindepth 1 -maxdepth 1 -type d); do

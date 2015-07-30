@@ -41,6 +41,7 @@ func GraphDot(g *Graph, opts *GraphDotOpts) (string, error) {
 	dg := dot.NewGraph(map[string]string{
 		"compound": "true",
 		"newrank":  "true",
+		"fontname": "helvetica",
 	})
 	dg.Directed = true
 
@@ -163,7 +164,7 @@ func graphDotSubgraph(
 }
 
 func graphDotNodeName(modName, v dag.Vertex) string {
-	return fmt.Sprintf("[%s] %s", modName, dag.VertexName(v))
+	return fmt.Sprintf("%s", dag.VertexName(v))
 }
 
 func graphDotFindOrigins(g *Graph) ([]dag.Vertex, error) {
