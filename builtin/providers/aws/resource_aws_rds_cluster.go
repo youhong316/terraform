@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/rds"
+	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 )
 
@@ -59,6 +62,18 @@ func resourceAwsRDSCluster() *schema.Resource {
 				Optional: true,
 				Computed: true,
 				ForceNew: true,
+			},
+
+			"db_subnet_group_name": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+				Computed: true,
+			},
+
+			"endpoint": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 
 			"engine": &schema.Schema{
@@ -123,10 +138,19 @@ func resourceAwsRDSClusterCreate(d *schema.ResourceData, meta interface{}) error
 		createOpts.Port = aws.Int64(int64(attr.(int)))
 	}
 
+	if attr, ok := d.GetOk("db_subnet_group_name"); ok {
+		createOpts.DBSubnetGroupName = aws.String(attr.(string))
+	}
+
 	if attr := d.Get("vpc_security_group_ids").(*schema.Set); attr.Len() > 0 {
 		createOpts.VPCSecurityGroupIDs = expandStringList(attr.List())
 	}
 
+	if attr := d.Get("availability_zones").(*schema.Set); attr.Len() > 0 {
+		createOpts.AvailabilityZones = expandStringList(attr.List())
+	}
+
+	log.Printf("[DEBUG] RDS Cluster create options: %s", createOpts)
 	resp, err := conn.CreateDBCluster(createOpts)
 	if err != nil {
 		log.Printf("[ERROR] Error creating RDS Cluster: %s", err)
@@ -134,8 +158,21 @@ func resourceAwsRDSClusterCreate(d *schema.ResourceData, meta interface{}) error
 	}
 
 	log.Printf("[DEBUG]: Cluster create response: %s", resp)
-
 	d.SetId(*resp.DBCluster.DBClusterIdentifier)
+	///
+	stateConf := &resource.StateChangeConf{
+		Pending:    []string{"creating", "backing-up", "modifying"},
+		Target:     "available",
+		Refresh:    resourceAwsRDSClusterStateRefreshFunc(d, meta),
+		Timeout:    5 * time.Minute,
+		MinTimeout: 3 * time.Second,
+	}
+
+	// Wait, catching any errors
+	_, err = stateConf.WaitForState()
+	if err != nil {
+		return fmt.Errorf("[WARN] Error waiting for RDS Cluster state to be \"available\": %s", err)
+	}
 
 	// tags := tagsFromMapRDS(d.Get("tags").(map[string]interface{}))
 	return resourceAwsRDSClusterRead(d, meta)
@@ -150,33 +187,46 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 	})
 
 	if err != nil {
-		log.Printf("[WARN] Error describing RDS Cluster (%s)", d.Id())
+		if awsErr, ok := err.(awserr.Error); ok {
+			if "DBClusterNotFoundFault" == awsErr.Code() {
+				d.SetId("")
+				log.Printf("[DEBUG] RDS Cluster (%s) not found", d.Id())
+				return nil
+			}
+		}
+		log.Printf("[DEBUG] Error describing RDS Cluster (%s)", d.Id())
 		return err
 	}
 
-	if len(resp.DBClusters) != 1 ||
-		*resp.DBClusters[0].DBClusterIdentifier != d.Id() {
-		log.Printf("[WARN] RDS DB Cluster (%s) not found", d.Id())
+	var dbc *rds.DBCluster
+	for _, c := range resp.DBClusters {
+		if *c.DBClusterIdentifier == d.Id() {
+			dbc = c
+		}
+	}
+
+	if dbc == nil {
+		log.Printf("[WARN] RDS Cluster (%s) not found", d.Id())
 		d.SetId("")
 		return nil
 	}
 
-	dbc := resp.DBClusters[0]
-
+	if err := d.Set("availability_zones", aws.StringValueSlice(dbc.AvailabilityZones)); err != nil {
+		log.Printf("[DEBUG] Error saving AvailabilityZones to state for RDS Cluster (%s): %s", d.Id(), err)
+	}
 	d.Set("database_name", dbc.DatabaseName)
+	d.Set("db_subnet_group_name", dbc.DBSubnetGroup)
+	d.Set("endpoint", dbc.Endpoint)
 	d.Set("engine", dbc.Engine)
 	d.Set("master_username", dbc.MasterUsername)
 	d.Set("port", dbc.Port)
-	if err := d.Set("availability_zones", aws.StringValueSlice(dbc.AvailabilityZones)); err != nil {
-		log.Printf("[DEBUG] Error saving AvailabilityZones to state for RDS Cluster (%s):", d.Id(), err)
-	}
 
 	var vpcg []string
 	for _, g := range dbc.VPCSecurityGroups {
 		vpcg = append(vpcg, *g.VPCSecurityGroupID)
 	}
 	if err := d.Set("vpc_security_group_ids", vpcg); err != nil {
-		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s):", d.Id(), err)
+		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %", d.Id(), err)
 	}
 
 	return nil
@@ -202,12 +252,10 @@ func resourceAwsRDSClusterUpdate(d *schema.ResourceData, meta interface{}) error
 		}
 	}
 
-	resp, err := conn.ModifyDBCluster(req)
+	_, err := conn.ModifyDBCluster(req)
 	if err != nil {
 		return fmt.Errorf("[WARN] Error modifying RDS Cluster (%s): %s", d.Id(), err)
 	}
-
-	log.Printf("\n\n-----\n modify response: %s", resp)
 
 	return resourceAwsRDSClusterRead(d, meta)
 }
@@ -216,20 +264,64 @@ func resourceAwsRDSClusterDelete(d *schema.ResourceData, meta interface{}) error
 	conn := meta.(*AWSClient).rdsconn
 	log.Printf("[DEBUG] Destroying RDS Cluster (%s)", d.Id())
 
-	r, err := conn.DeleteDBCluster(&rds.DeleteDBClusterInput{
+	_, err := conn.DeleteDBCluster(&rds.DeleteDBClusterInput{
 		DBClusterIdentifier: aws.String(d.Id()),
 		SkipFinalSnapshot:   aws.Bool(true),
 		// final snapshot identifier
 	})
 
-	log.Printf("\n\n-----\n Delete response: %s", r)
+	stateConf := &resource.StateChangeConf{
+		Pending:    []string{"deleting", "backing-up", "modifying"},
+		Target:     "destroyed",
+		Refresh:    resourceAwsRDSClusterStateRefreshFunc(d, meta),
+		Timeout:    5 * time.Minute,
+		MinTimeout: 3 * time.Second,
+	}
 
-	// wait for state delete
-
+	// Wait, catching any errors
+	_, err = stateConf.WaitForState()
 	if err != nil {
-		log.Printf("[WARN] Error deleting RDS Cluster (%s): %s", d.Id(), err)
-		return err
+		return fmt.Errorf("[WARN] Error deleting RDS Cluster (%s): %s", d.Id(), err)
 	}
 
 	return nil
+}
+
+func resourceAwsRDSClusterStateRefreshFunc(
+	d *schema.ResourceData, meta interface{}) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		conn := meta.(*AWSClient).rdsconn
+
+		resp, err := conn.DescribeDBClusters(&rds.DescribeDBClustersInput{
+			DBClusterIdentifier: aws.String(d.Id()),
+		})
+
+		if err != nil {
+			if awsErr, ok := err.(awserr.Error); ok {
+				if "DBClusterNotFoundFault" == awsErr.Code() {
+					return 42, "destroyed", nil
+				}
+			}
+			log.Printf("[WARN] Error on retrieving DB Cluster (%s) when waiting: %s", d.Id(), err)
+			return nil, "", err
+		}
+
+		var dbc *rds.DBCluster
+
+		for _, c := range resp.DBClusters {
+			if *c.DBClusterIdentifier == d.Id() {
+				dbc = c
+			}
+		}
+
+		if dbc == nil {
+			return 42, "destroyed", nil
+		}
+
+		if dbc.Status != nil {
+			log.Printf("[DEBUG] DB Cluster status (%s): %s", d.Id(), *dbc.Status)
+		}
+
+		return dbc, *dbc.Status, nil
+	}
 }
