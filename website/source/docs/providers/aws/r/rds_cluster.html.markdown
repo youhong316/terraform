@@ -52,6 +52,10 @@ string.
 * `port` - (Optional) The port on which the DB accepts connections
 * `vpc_security_group_ids` - (Optional) List of VPC security groups to associate
   with the Cluster
+* `apply_immediately` - (Optional) Specifies whether any cluster modifications
+     are applied immediately, or during the next maintenance window. Default is
+     `false`. See [Amazon RDS Documentation for more information.](http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.DBInstance.Modifying.html)
+* `vpc_security_group_ids` - (Optional) List of VPC security groups to associate.
 * `tags` – (Optional) A list of tags to associate with the Cluster
 
 ## Attributes Reference

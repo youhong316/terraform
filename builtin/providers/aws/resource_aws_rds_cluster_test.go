@@ -2,7 +2,6 @@ package aws
 
 import (
 	"fmt"
-	"log"
 	"math/rand"
 	"testing"
 	"time"
@@ -33,12 +32,28 @@ func TestAccAWSRDSCluster_basic(t *testing.T) {
 }
 
 func testAccCheckAWSClusterDestroy(s *terraform.State) error {
-	// conn := testAccProvider.Meta().(*AWSClient).rdsconn
-
 	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "aws_db_instance" {
+		if rs.Type != "aws_rds_cluster" {
 			continue
 		}
+
+		// Try to find the Group
+		conn := testAccProvider.Meta().(*AWSClient).rdsconn
+		var err error
+		resp, err := conn.DescribeDBClusters(
+			&rds.DescribeDBClustersInput{
+				DBClusterIdentifier: aws.String(rs.Primary.ID),
+			})
+
+		if err == nil {
+			if len(resp.DBClusters) != 0 &&
+				*resp.DBClusters[0].DBClusterIdentifier == rs.Primary.ID {
+				return fmt.Errorf("DB Clusterstill exists")
+			}
+		}
+
+		// check for an expected "Cluster not found" type error
+		return err
 
 	}
 
@@ -54,8 +69,6 @@ func testAccCheckAWSClusterExists(n string, v *rds.DBCluster) resource.TestCheck
 
 		if rs.Primary.ID == "" {
 			return fmt.Errorf("No DB Instance ID is set")
-		} else {
-			log.Println("------\nFound db: ", rs.Primary.ID)
 		}
 
 		conn := testAccProvider.Meta().(*AWSClient).rdsconn
