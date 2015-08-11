@@ -14,7 +14,10 @@ specifically running Amazon Aurora.
 
 Unlike other RDS resources that support replication, with Amazon Aurora you do
 not designate a primary and subsequent replicas. Instead, you simply add RDS
-Instances and Aurora manages the replication.
+Instances and Aurora manages the replication. You can use the [count][5]
+meta-parameter to make multiple instances and join them all to the same RDS
+Cluster, or you may specify different Cluster Instance resources with various
+`instance_class` sizes. 
 
 For more information on Amazon Aurora, see [Aurora on Amazon RDS][2] in the Amazon RDS User Guide.
 
@@ -49,13 +52,16 @@ string.
 * `cluster_identifier` - (Required) The Cluster Identifer for this Instance to
 join. Must be a lower case
 string.
-* `instance_class` - (Required) The instance class to use. Aurora currently 
-  supports the following instance classes:  
+* `instance_class` - (Required) The instance class to use. For details on CPU 
+and memory, see [Scaling Aurora DB Instances][4]. Aurora currently 
+  supports the below instance classes.
   - db.r3.large
   - db.r3.xlarge
   - db.r3.2xlarge
   - db.r3.4xlarge
-  - db.r3.8xlarge
+  - db.r3.8xlarge  
+
+.
 
 ## Attributes Reference
 
@@ -77,3 +83,5 @@ this instance is a read replica
 
 [2]: http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Aurora.html
 [3]: /docs/providers/aws/r/rds_cluster.html
+[4]: http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Aurora.Managing.html
+[5]: /docs/configuration/resources.html#count

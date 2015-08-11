@@ -511,22 +511,11 @@ func resourceAwsDbInstanceRead(d *schema.ResourceData, meta interface{}) error {
 		if v.DBName != nil && *v.DBName != "" {
 			name = *v.DBName
 		}
-
 		log.Printf("[DEBUG] Error building ARN for DB Instance, not setting Tags for DB %s", name)
 	} else {
-		resp, err := conn.ListTagsForResource(&rds.ListTagsForResourceInput{
-			ResourceName: aws.String(arn),
-		})
-
-		if err != nil {
-			log.Printf("[DEBUG] Error retreiving tags for ARN: %s", arn)
+		if err := saveTagsRDS(conn, d, arn); err != nil {
+			log.Printf("[WARN] Failed to save tags for RDS Instance (%s): %s", d.Id(), err)
 		}
-
-		var dt []*rds.Tag
-		if len(resp.TagList) > 0 {
-			dt = resp.TagList
-		}
-		d.Set("tags", tagsToMapRDS(dt))
 	}
 
 	// Create an empty schema.Set to hold all vpc security group ids

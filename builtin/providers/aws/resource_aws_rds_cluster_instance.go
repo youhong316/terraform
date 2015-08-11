@@ -80,11 +80,13 @@ func resourceAwsRDSClusterInstance() *schema.Resource {
 
 func resourceAwsRDSClusterInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).rdsconn
+	tags := tagsFromMapRDS(d.Get("tags").(map[string]interface{}))
 
 	createOpts := &rds.CreateDBInstanceInput{
 		DBInstanceClass:     aws.String(d.Get("instance_class").(string)),
 		DBClusterIdentifier: aws.String(d.Get("cluster_identifier").(string)),
 		Engine:              aws.String("aurora"),
+		Tags:                tags,
 	}
 
 	if v := d.Get("identifier").(string); v != "" {
@@ -99,18 +101,16 @@ func resourceAwsRDSClusterInstanceCreate(d *schema.ResourceData, meta interface{
 		return err
 	}
 
-	log.Printf("\n\n-----\nCreate Instance response: %s", resp)
-	// tags := tagsFromMapRDS(d.Get("tags").(map[string]interface{}))
 	d.SetId(*resp.DBInstance.DBInstanceIdentifier)
 
-	// Use DB Instance refresh func
+	// reuse db_instance refresh func
 	stateConf := &resource.StateChangeConf{
 		Pending:    []string{"creating", "backing-up", "modifying"},
 		Target:     "available",
 		Refresh:    resourceAwsDbInstanceStateRefreshFunc(d, meta),
 		Timeout:    40 * time.Minute,
 		MinTimeout: 10 * time.Second,
-		Delay:      10 * time.Second, // Wait 30 secs before starting
+		Delay:      10 * time.Second,
 	}
 
 	// Wait, catching any errors
@@ -160,15 +160,30 @@ func resourceAwsRDSClusterInstanceRead(d *schema.ResourceData, meta interface{})
 
 	if db.Endpoint != nil {
 		d.Set("endpoint", db.Endpoint.Address)
-		// May not be the same as db.InstancePort
 		d.Set("port", db.Endpoint.Port)
+	}
+
+	// Fetch and save tags
+	arn, err := buildRDSARN(d, meta)
+	if err != nil {
+		log.Printf("[DEBUG] Error building ARN for RDS Cluster Instance (%s), not setting Tags", *db.DBInstanceIdentifier)
+	} else {
+		if err := saveTagsRDS(conn, d, arn); err != nil {
+			log.Printf("[WARN] Failed to save tags for RDS Cluster Instance (%s): %s", *db.DBClusterIdentifier, err)
+		}
 	}
 
 	return nil
 }
 
 func resourceAwsRDSClusterInstanceUpdate(d *schema.ResourceData, meta interface{}) error {
-	// conn := meta.(*AWSClient).rdsconn
+	conn := meta.(*AWSClient).rdsconn
+
+	if arn, err := buildRDSARN(d, meta); err == nil {
+		if err := setTagsRDS(conn, d, arn); err != nil {
+			return err
+		}
+	}
 
 	return resourceAwsRDSClusterInstanceRead(d, meta)
 }
@@ -180,11 +195,12 @@ func resourceAwsRDSClusterInstanceDelete(d *schema.ResourceData, meta interface{
 
 	opts := rds.DeleteDBInstanceInput{DBInstanceIdentifier: aws.String(d.Id())}
 
-	log.Printf("[DEBUG] RDS Cluster Instance destroy configuration: %v", opts)
+	log.Printf("[DEBUG] RDS Cluster Instance destroy configuration: %s", opts)
 	if _, err := conn.DeleteDBInstance(&opts); err != nil {
 		return err
 	}
 
+	// re-uses db_instance refresh func
 	log.Println("[INFO] Waiting for RDS Cluster Instance to be destroyed")
 	stateConf := &resource.StateChangeConf{
 		Pending:    []string{"modifying", "deleting"},

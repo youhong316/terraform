@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -92,4 +93,21 @@ func tagsToMapRDS(ts []*rds.Tag) map[string]string {
 	}
 
 	return result
+}
+
+func saveTagsRDS(conn *rds.RDS, d *schema.ResourceData, arn string) error {
+	resp, err := conn.ListTagsForResource(&rds.ListTagsForResourceInput{
+		ResourceName: aws.String(arn),
+	})
+
+	if err != nil {
+		return fmt.Errorf("[DEBUG] Error retreiving tags for ARN: %s", arn)
+	}
+
+	var dt []*rds.Tag
+	if len(resp.TagList) > 0 {
+		dt = resp.TagList
+	}
+
+	return d.Set("tags", tagsToMapRDS(dt))
 }
