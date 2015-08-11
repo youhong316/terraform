@@ -81,6 +81,19 @@ func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) er
 		})
 	}
 
+	// Add any new accounts to the AMI permissions
+	_, err := ec2conn.ModifyImageAttribute(
+		&ec2.ModifyImageAttributeInput{
+			ImageID:   aws.String(ami),
+			Attribute: aws.String(ec2.ImageAttributeNameLaunchPermission),
+			LaunchPermission: &ec2.LaunchPermissionModifications{
+				Add: addPerms,
+			},
+		})
+	if err != nil {
+		return fmt.Errorf("Error adding AMI permissions (%s): %s", ami, err)
+	}
+
 	// Accumulate all of the obsolete account ID's to delete
 	delPerms := make([]*ec2.LaunchPermission, oas.Len())
 	for _, acc := range oas.List() {
@@ -90,17 +103,16 @@ func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) er
 	}
 
 	// Modify the AMI permissions to bring the state in sync
-	_, err := ec2conn.ModifyImageAttribute(
+	_, err = ec2conn.ModifyImageAttribute(
 		&ec2.ModifyImageAttributeInput{
 			ImageID:   aws.String(ami),
 			Attribute: aws.String(ec2.ImageAttributeNameLaunchPermission),
 			LaunchPermission: &ec2.LaunchPermissionModifications{
-				Add:    addPerms,
 				Remove: delPerms,
 			},
 		})
 	if err != nil {
-		return fmt.Errorf("Error adjusting AMI permissions (%s): %s", ami, err)
+		return fmt.Errorf("Error removing AMI permissions (%s): %s", ami, err)
 	}
 
 	// Save the current state
