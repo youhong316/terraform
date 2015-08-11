@@ -234,7 +234,7 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 		vpcg = append(vpcg, *g.VPCSecurityGroupID)
 	}
 	if err := d.Set("vpc_security_group_ids", vpcg); err != nil {
-		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %", d.Id(), err)
+		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %s", d.Id(), err)
 	}
 
 	var cm []string
@@ -242,7 +242,7 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 		cm = append(cm, *m.DBInstanceIdentifier)
 	}
 	if err := d.Set("cluster_members", cm); err != nil {
-		log.Printf("[DEBUG] Error saving RDS Cluster Members to state for RDS Cluster (%s): %", d.Id(), err)
+		log.Printf("[DEBUG] Error saving RDS Cluster Members to state for RDS Cluster (%s): %s", d.Id(), err)
 	}
 
 	return nil
