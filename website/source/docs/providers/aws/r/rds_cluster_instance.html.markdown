@@ -44,9 +44,10 @@ the [AWS official documentation](http://docs.aws.amazon.com/AmazonRDS/latest/Com
 
 The following arguments are supported:
 
-* `instance_identifier` - (Required) The Instance Identifer. Must be a lower case
+* `identifier` - (Required) The Instance Identifer. Must be a lower case
 string.
-* `cluster_identifier` - (Required) The Cluster Identifer. Must be a lower case
+* `cluster_identifier` - (Required) The Cluster Identifer for this Instance to
+join. Must be a lower case
 string.
 * `instance_class` - (Required) The instance class to use. Aurora currently 
   supports the following instance classes:  
@@ -61,11 +62,10 @@ string.
 The following attributes are exported:
 
 * `cluster_identifer` - The RDS Cluster Identifer
-* `instance_identifer` - The Instance identifer
+* `identifer` - The Instance identifer
 * `id` - The Instance identifer
 * `writer` – Boolean indicating if this instance is writable. `False` indicates
 this instance is a read replica
-* `address` - The address of the RDS instance.
 * `allocated_storage` - The amount of allocated storage
 * `availability_zones` - The availability zone of the instance
 * `endpoint` - The IP address for this instance. May not be writable

@@ -57,6 +57,14 @@ func resourceAwsRDSCluster() *schema.Resource {
 				},
 			},
 
+			"cluster_members": &schema.Schema{
+				Type:     schema.TypeSet,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Optional: true,
+				Computed: true,
+				Set:      schema.HashString,
+			},
+
 			"database_name": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
@@ -227,6 +235,14 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 	}
 	if err := d.Set("vpc_security_group_ids", vpcg); err != nil {
 		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %", d.Id(), err)
+	}
+
+	var cm []string
+	for _, m := range dbc.DBClusterMembers {
+		cm = append(cm, *m.DBInstanceIdentifier)
+	}
+	if err := d.Set("cluster_members", cm); err != nil {
+		log.Printf("[DEBUG] Error saving RDS Cluster Members to state for RDS Cluster (%s): %", d.Id(), err)
 	}
 
 	return nil

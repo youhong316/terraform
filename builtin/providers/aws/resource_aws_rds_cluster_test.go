@@ -22,7 +22,7 @@ func TestAccAWSRDSCluster_basic(t *testing.T) {
 		CheckDestroy: testAccCheckAWSClusterDestroy,
 		Steps: []resource.TestStep{
 			resource.TestStep{
-				Config: testAccAWSClsuterConfig,
+				Config: testAccAWSClusterConfig,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckAWSClusterExists("aws_rds_cluster.default", &v),
 				),
@@ -48,7 +48,7 @@ func testAccCheckAWSClusterDestroy(s *terraform.State) error {
 		if err == nil {
 			if len(resp.DBClusters) != 0 &&
 				*resp.DBClusters[0].DBClusterIdentifier == rs.Primary.ID {
-				return fmt.Errorf("DB Clusterstill exists")
+				return fmt.Errorf("DB Cluster %s still exists", rs.Primary.ID)
 			}
 		}
 
@@ -92,7 +92,7 @@ func testAccCheckAWSClusterExists(n string, v *rds.DBCluster) resource.TestCheck
 }
 
 // Add some random to the name, to avoid collision
-var testAccAWSClsuterConfig = fmt.Sprintf(`
+var testAccAWSClusterConfig = fmt.Sprintf(`
 resource "aws_rds_cluster" "default" {
   cluster_identifier = "tf-aurora-cluster-%d"
   availability_zones = ["us-west-2a","us-west-2b","us-west-2c"]
