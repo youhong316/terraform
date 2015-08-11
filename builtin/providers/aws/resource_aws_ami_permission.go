@@ -7,16 +7,15 @@ import (
 	"github.com/hashicorp/terraform/helper/schema"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/ec2"
 )
 
 func resourceAwsAmiPermission() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceAwsAmiPermissionPut,
+		Create: resourceAwsAmiPermissionUpdate,
 		Read:   resourceAwsAmiPermissionRead,
 		Update: resourceAwsAmiPermissionUpdate,
-		Delete: resourceAwsAmiPermissionDelete,
+		Delete: resourceAwsAmiPermissionUpdate,
 
 		Schema: map[string]*schema.Schema{
 			"ami": &schema.Schema{
@@ -35,38 +34,17 @@ func resourceAwsAmiPermission() *schema.Resource {
 	}
 }
 
-func resourceAwsAmiPermissionPut(d *schema.ResourceData, meta interface{}) error {
-	ec2conn := meta.(*AWSClient).ec2conn
-
-	ami := d.Get("ami").(string)
-	perms := resourceAwsAmiPermissionGetLP(d)
-	log.Printf("%#v", perms)
-
-	_, err := ec2conn.ModifyImageAttribute(
-		&ec2.ModifyImageAttributeInput{
-			ImageID:   aws.String(ami),
-			Attribute: aws.String(ec2.ImageAttributeNameLaunchPermission),
-			LaunchPermission: &ec2.LaunchPermissionModifications{
-				Add: perms,
-			},
-		})
-
-	if err != nil {
-		return fmt.Errorf("Error modifying AMI permissions (%s): %s", ami, err)
-	}
-	return resourceAwsAmiPermissionRead(d, meta)
-}
-
 func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) error {
 	ec2conn := meta.(*AWSClient).ec2conn
 
-	// First check if we have any changes
-	if !d.HasChange("accounts") {
-		return nil
-	}
-
 	// Get the AMI ID
 	ami := d.Get("ami").(string)
+
+	// First check if we have any changes
+	if !d.HasChange("accounts") {
+		log.Printf("[DEBUG] No changes detected for AMI permissions (%s)", ami)
+		return nil
+	}
 
 	// Gather all of the changes and diff the sets
 	o, n := d.GetChange("accounts")
@@ -76,12 +54,14 @@ func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) er
 	// Accumulate any new accounts that need permissions added
 	addPerms := make([]*ec2.LaunchPermission, nas.Len())
 	for _, acc := range nas.List() {
+		account := acc.(string)
+		log.Printf("[DEBUG] Adding AMI permission (%s): %s", ami, account)
 		addPerms = append(addPerms, &ec2.LaunchPermission{
-			UserID: aws.String(acc.(string)),
+			UserID: aws.String(account),
 		})
 	}
 
-	// Add any new accounts to the AMI permissions
+	// Add the new account permissions
 	_, err := ec2conn.ModifyImageAttribute(
 		&ec2.ModifyImageAttributeInput{
 			ImageID:   aws.String(ami),
@@ -97,12 +77,14 @@ func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) er
 	// Accumulate all of the obsolete account ID's to delete
 	delPerms := make([]*ec2.LaunchPermission, oas.Len())
 	for _, acc := range oas.List() {
+		account := acc.(string)
+		log.Printf("[DEBUG] Removing AMI permission (%s): %s", ami, account)
 		delPerms = append(delPerms, &ec2.LaunchPermission{
-			UserID: aws.String(acc.(string)),
+			UserID: aws.String(account),
 		})
 	}
 
-	// Modify the AMI permissions to bring the state in sync
+	// Remove the obsolete account ID's
 	_, err = ec2conn.ModifyImageAttribute(
 		&ec2.ModifyImageAttributeInput{
 			ImageID:   aws.String(ami),
@@ -115,11 +97,7 @@ func resourceAwsAmiPermissionUpdate(d *schema.ResourceData, meta interface{}) er
 		return fmt.Errorf("Error removing AMI permissions (%s): %s", ami, err)
 	}
 
-	// Save the current state
-	accounts := o.(*schema.Set).Intersection(n.(*schema.Set))
-	d.Set("accounts", accounts)
-
-	return nil
+	return resourceAwsAmiPermissionRead(d, meta)
 }
 
 func resourceAwsAmiPermissionRead(d *schema.ResourceData, meta interface{}) error {
@@ -127,71 +105,41 @@ func resourceAwsAmiPermissionRead(d *schema.ResourceData, meta interface{}) erro
 
 	ami := d.Get("ami").(string)
 
+	// Get the current set of permissions from AWS
 	resp, err := ec2conn.DescribeImageAttribute(
 		&ec2.DescribeImageAttributeInput{
 			ImageID:   aws.String(ami),
 			Attribute: aws.String(ec2.ImageAttributeNameLaunchPermission),
 		})
-
 	if err != nil {
-		// If we get a 404, mark the perms as destroyed
-		if awsErr, ok := err.(awserr.RequestFailure); ok && awsErr.StatusCode() == 404 {
-			d.SetId("")
-			log.Printf("[WARN] Error reading AMI permission (%s), not found (HTTP status 404)", ami)
-			return nil
-		}
-		return err
+		return fmt.Errorf("Error describing AMI permissions (%s): %s", ami, err)
 	}
 
 	d.SetId(ami)
-	exist := d.Get("accounts").(*schema.Set)
-OUTER:
-	for _, lp := range exist.List() {
-		for _, remote := range resp.LaunchPermissions {
-			if *remote.UserID == lp.(string) {
-				continue OUTER
-			}
-		}
-		exist.Remove(lp)
-	}
+
+	// Get the current set of accounts from the local state
+	acc := d.Get("accounts").(*schema.Set)
+
+	// Add all of the remote accounts into our local state
 	for _, lp := range resp.LaunchPermissions {
-		exist.Add(*lp.UserID)
+		acc.Add(*lp.UserID)
 	}
-	d.Set("accounts", exist)
 
-	log.Printf("[DEBUG] Reading AMI permission meta: %s", resp)
+	// Build the set of remote account permissions
+	remotes := make(map[string]struct{}, acc.Len())
+	for _, remote := range resp.LaunchPermissions {
+		remotes[*remote.UserID] = struct{}{}
+	}
+
+	// Go over all of the locally known accounts and ensure
+	// they still exist remotely in AWS.
+	for _, lp := range acc.List() {
+		if _, ok := remotes[lp.(string)]; !ok {
+			acc.Remove(lp)
+		}
+	}
+
+	// Save the current state of the AMI permissions
+	d.Set("accounts", acc)
 	return nil
-}
-
-func resourceAwsAmiPermissionDelete(d *schema.ResourceData, meta interface{}) error {
-	ec2conn := meta.(*AWSClient).ec2conn
-
-	ami := d.Get("ami").(string)
-	perms := resourceAwsAmiPermissionGetLP(d)
-
-	// Build the new perms
-	_, err := ec2conn.ModifyImageAttribute(
-		&ec2.ModifyImageAttributeInput{
-			ImageID:   aws.String(ami),
-			Attribute: aws.String(ec2.ImageAttributeNameLaunchPermission),
-			LaunchPermission: &ec2.LaunchPermissionModifications{
-				Remove: perms,
-			},
-		})
-
-	if err != nil {
-		return fmt.Errorf("Error removing AMI permissions (%s): %s", ami, err)
-	}
-	return nil
-}
-
-func resourceAwsAmiPermissionGetLP(d *schema.ResourceData) []*ec2.LaunchPermission {
-	perms := d.Get("accounts").(*schema.Set)
-	lp := make([]*ec2.LaunchPermission, perms.Len())
-	for _, perm := range perms.List() {
-		lp = append(lp, &ec2.LaunchPermission{
-			UserID: aws.String(perm.(string)),
-		})
-	}
-	return lp
 }
