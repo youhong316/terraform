@@ -155,6 +155,7 @@ func Provider() terraform.ResourceProvider {
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
+			"aws_ami_permission":               resourceAwsAmiPermission(),
 			"aws_app_cookie_stickiness_policy": resourceAwsAppCookieStickinessPolicy(),
 			"aws_autoscaling_group":            resourceAwsAutoscalingGroup(),
 			"aws_autoscaling_notification":     resourceAwsAutoscalingNotification(),
