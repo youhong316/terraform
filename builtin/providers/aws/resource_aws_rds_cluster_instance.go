@@ -3,7 +3,6 @@ package aws
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -21,29 +20,10 @@ func resourceAwsRDSClusterInstance() *schema.Resource {
 
 		Schema: map[string]*schema.Schema{
 			"identifier": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				ForceNew: true,
-				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
-					value := v.(string)
-					if !regexp.MustCompile(`^[0-9a-z-]+$`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"only lowercase alphanumeric characters and hyphens allowed in %q", k))
-					}
-					if !regexp.MustCompile(`^[a-z]`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"first character of %q must be a letter", k))
-					}
-					if regexp.MustCompile(`--`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"%q cannot contain two consecutive hyphens", k))
-					}
-					if regexp.MustCompile(`-$`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"%q cannot end with a hyphen", k))
-					}
-					return
-				},
+				Type:         schema.TypeString,
+				Optional:     true,
+				ForceNew:     true,
+				ValidateFunc: validateRdsId,
 			},
 
 			"writer": &schema.Schema{
@@ -216,13 +196,4 @@ func resourceAwsRDSClusterInstanceDelete(d *schema.ResourceData, meta interface{
 
 	return nil
 
-}
-
-func resourceAwsRDSClusterInstanceStateRefreshFunc(
-	d *schema.ResourceData, meta interface{}) resource.StateRefreshFunc {
-	return func() (interface{}, string, error) {
-		// conn := meta.(*AWSClient).rdsconn
-		// return dbc, *dbc.Status, nil
-		return 42, "", nil
-	}
 }

@@ -3,7 +3,6 @@ package aws
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -32,29 +31,10 @@ func resourceAwsRDSCluster() *schema.Resource {
 			},
 
 			"cluster_identifier": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
-				ValidateFunc: func(v interface{}, k string) (ws []string, errors []error) {
-					value := v.(string)
-					if !regexp.MustCompile(`^[0-9a-z-]+$`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"only lowercase alphanumeric characters and hyphens allowed in %q", k))
-					}
-					if !regexp.MustCompile(`^[a-z]`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"first character of %q must be a letter", k))
-					}
-					if regexp.MustCompile(`--`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"%q cannot contain two consecutive hyphens", k))
-					}
-					if regexp.MustCompile(`-$`).MatchString(value) {
-						errors = append(errors, fmt.Errorf(
-							"%q cannot end with a hyphen", k))
-					}
-					return
-				},
+				Type:         schema.TypeString,
+				Required:     true,
+				ForceNew:     true,
+				ValidateFunc: validateRdsId,
 			},
 
 			"cluster_members": &schema.Schema{
@@ -122,8 +102,6 @@ func resourceAwsRDSCluster() *schema.Resource {
 				Elem:     &schema.Schema{Type: schema.TypeString},
 				Set:      schema.HashString,
 			},
-
-			"tags": tagsSchema(),
 		},
 	}
 }
@@ -151,7 +129,7 @@ func resourceAwsRDSClusterCreate(d *schema.ResourceData, meta interface{}) error
 	}
 
 	if attr := d.Get("vpc_security_group_ids").(*schema.Set); attr.Len() > 0 {
-		createOpts.VPCSecurityGroupIDs = expandStringList(attr.List())
+		createOpts.VpcSecurityGroupIds = expandStringList(attr.List())
 	}
 
 	if attr := d.Get("availability_zones").(*schema.Set); attr.Len() > 0 {
@@ -167,7 +145,6 @@ func resourceAwsRDSClusterCreate(d *schema.ResourceData, meta interface{}) error
 
 	log.Printf("[DEBUG]: Cluster create response: %s", resp)
 	d.SetId(*resp.DBCluster.DBClusterIdentifier)
-	///
 	stateConf := &resource.StateChangeConf{
 		Pending:    []string{"creating", "backing-up", "modifying"},
 		Target:     "available",
@@ -182,7 +159,6 @@ func resourceAwsRDSClusterCreate(d *schema.ResourceData, meta interface{}) error
 		return fmt.Errorf("[WARN] Error waiting for RDS Cluster state to be \"available\": %s", err)
 	}
 
-	// tags := tagsFromMapRDS(d.Get("tags").(map[string]interface{}))
 	return resourceAwsRDSClusterRead(d, meta)
 }
 
@@ -230,8 +206,8 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 	d.Set("port", dbc.Port)
 
 	var vpcg []string
-	for _, g := range dbc.VPCSecurityGroups {
-		vpcg = append(vpcg, *g.VPCSecurityGroupID)
+	for _, g := range dbc.VpcSecurityGroups {
+		vpcg = append(vpcg, *g.VpcSecurityGroupId)
 	}
 	if err := d.Set("vpc_security_group_ids", vpcg); err != nil {
 		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %s", d.Id(), err)
@@ -262,9 +238,9 @@ func resourceAwsRDSClusterUpdate(d *schema.ResourceData, meta interface{}) error
 
 	if d.HasChange("vpc_security_group_ids") {
 		if attr := d.Get("vpc_security_group_ids").(*schema.Set); attr.Len() > 0 {
-			req.VPCSecurityGroupIDs = expandStringList(attr.List())
+			req.VpcSecurityGroupIds = expandStringList(attr.List())
 		} else {
-			req.VPCSecurityGroupIDs = []*string{}
+			req.VpcSecurityGroupIds = []*string{}
 		}
 	}
 
