@@ -196,7 +196,7 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	if err := d.Set("availability_zones", aws.StringValueSlice(dbc.AvailabilityZones)); err != nil {
-		log.Printf("[DEBUG] Error saving AvailabilityZones to state for RDS Cluster (%s): %s", d.Id(), err)
+		return fmt.Errorf("[DEBUG] Error saving AvailabilityZones to state for RDS Cluster (%s): %s", d.Id(), err)
 	}
 	d.Set("database_name", dbc.DatabaseName)
 	d.Set("db_subnet_group_name", dbc.DBSubnetGroup)
@@ -210,7 +210,7 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 		vpcg = append(vpcg, *g.VpcSecurityGroupId)
 	}
 	if err := d.Set("vpc_security_group_ids", vpcg); err != nil {
-		log.Printf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %s", d.Id(), err)
+		return fmt.Errorf("[DEBUG] Error saving VPC Security Group IDs to state for RDS Cluster (%s): %s", d.Id(), err)
 	}
 
 	var cm []string
@@ -218,7 +218,7 @@ func resourceAwsRDSClusterRead(d *schema.ResourceData, meta interface{}) error {
 		cm = append(cm, *m.DBInstanceIdentifier)
 	}
 	if err := d.Set("cluster_members", cm); err != nil {
-		log.Printf("[DEBUG] Error saving RDS Cluster Members to state for RDS Cluster (%s): %s", d.Id(), err)
+		return fmt.Errorf("[DEBUG] Error saving RDS Cluster Members to state for RDS Cluster (%s): %s", d.Id(), err)
 	}
 
 	return nil
