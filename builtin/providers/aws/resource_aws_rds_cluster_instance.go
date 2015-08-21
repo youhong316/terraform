@@ -26,6 +26,13 @@ func resourceAwsRDSClusterInstance() *schema.Resource {
 				ValidateFunc: validateRdsId,
 			},
 
+			"db_subnet_group_name": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+				Computed: true,
+			},
+
 			"writer": &schema.Schema{
 				Type:     schema.TypeBool,
 				Computed: true,
@@ -73,6 +80,10 @@ func resourceAwsRDSClusterInstanceCreate(d *schema.ResourceData, meta interface{
 		createOpts.DBInstanceIdentifier = aws.String(v)
 	} else {
 		createOpts.DBInstanceIdentifier = aws.String(resource.UniqueId())
+	}
+
+	if attr, ok := d.GetOk("db_subnet_group_name"); ok {
+		createOpts.DBSubnetGroupName = aws.String(attr.(string))
 	}
 
 	log.Printf("[DEBUG] Creating RDS DB Instance opts: %s", createOpts)
