@@ -37,7 +37,7 @@ the [AWS official documentation](http://docs.aws.amazon.com/AmazonRDS/latest/Com
 
 The following arguments are supported:
 
-* `cluster_identifier` - (Required) The Cluster Identifer. Must be a lower case
+* `cluster_identifier` - (Required) The Cluster Identifier. Must be a lower case
 string.
 * `database_name` - (Optional) The name for your database of up to 8 alpha-numeric 
   characters. If you do not provide a name, Amazon RDS will not create a 
@@ -61,8 +61,8 @@ string.
 
 The following attributes are exported:
 
-* `id` - The RDS Cluster Identifer
-* `cluster_identifer` - The RDS Cluster Identifer
+* `id` - The RDS Cluster Identifier
+* `cluster_identifier` - The RDS Cluster Identifier
 * `cluster_members` – List of RDS Instances that are a part of this cluster
 * `address` - The address of the RDS instance.
 * `allocated_storage` - The amount of allocated storage

@@ -26,7 +26,7 @@ For more information on Amazon Aurora, see [Aurora on Amazon RDS][2] in the Amaz
 ```
 resource "aws_rds_cluster_instance" "cluster_instances" {
   count = 2
-  instance_identifier = "aurora-cluster-demo"
+  identifier = "aurora-cluster-demo"
   cluster_identifer = "${aws_rds_cluster.default.id}"
   instance_class = "db.r3.large"
 }
@@ -47,9 +47,9 @@ the [AWS official documentation](http://docs.aws.amazon.com/AmazonRDS/latest/Com
 
 The following arguments are supported:
 
-* `identifier` - (Required) The Instance Identifer. Must be a lower case
+* `identifier` - (Required) The Instance Identifier. Must be a lower case
 string.
-* `cluster_identifier` - (Required) The Cluster Identifer for this Instance to
+* `cluster_identifier` - (Required) The Cluster Identifier for this Instance to
 join. Must be a lower case
 string.
 * `instance_class` - (Required) The instance class to use. For details on CPU 
@@ -67,9 +67,9 @@ and memory, see [Scaling Aurora DB Instances][4]. Aurora currently
 
 The following attributes are exported:
 
-* `cluster_identifer` - The RDS Cluster Identifer
-* `identifer` - The Instance identifer
-* `id` - The Instance identifer
+* `cluster_identifier` - The RDS Cluster Identifier
+* `identifier` - The Instance identifier
+* `id` - The Instance identifier
 * `writer` – Boolean indicating if this instance is writable. `False` indicates
 this instance is a read replica
 * `allocated_storage` - The amount of allocated storage
