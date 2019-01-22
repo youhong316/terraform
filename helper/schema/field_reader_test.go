@@ -211,6 +211,25 @@ func testFieldReader(t *testing.T, f func(map[string]*Schema) FieldReader) {
 
 		// Maps
 		"map": &Schema{Type: TypeMap},
+		"mapInt": &Schema{
+			Type: TypeMap,
+			Elem: TypeInt,
+		},
+
+		// This is used to verify that the type of a Map can be specified using the
+		// same syntax as for lists (as a nested *Schema passed to Elem)
+		"mapIntNestedSchema": &Schema{
+			Type: TypeMap,
+			Elem: &Schema{Type: TypeInt},
+		},
+		"mapFloat": &Schema{
+			Type: TypeMap,
+			Elem: TypeFloat,
+		},
+		"mapBool": &Schema{
+			Type: TypeMap,
+			Elem: TypeBool,
+		},
 
 		// Sets
 		"set": &Schema{
@@ -335,6 +354,57 @@ func testFieldReader(t *testing.T, f func(map[string]*Schema) FieldReader) {
 			false,
 		},
 
+		"mapInt": {
+			[]string{"mapInt"},
+			FieldReadResult{
+				Value: map[string]interface{}{
+					"one": 1,
+					"two": 2,
+				},
+				Exists:   true,
+				Computed: false,
+			},
+			false,
+		},
+
+		"mapIntNestedSchema": {
+			[]string{"mapIntNestedSchema"},
+			FieldReadResult{
+				Value: map[string]interface{}{
+					"one": 1,
+					"two": 2,
+				},
+				Exists:   true,
+				Computed: false,
+			},
+			false,
+		},
+
+		"mapFloat": {
+			[]string{"mapFloat"},
+			FieldReadResult{
+				Value: map[string]interface{}{
+					"oneDotTwo": 1.2,
+				},
+				Exists:   true,
+				Computed: false,
+			},
+			false,
+		},
+
+		"mapBool": {
+			[]string{"mapBool"},
+			FieldReadResult{
+				Value: map[string]interface{}{
+					"True":  true,
+					"False": false,
+				},
+				Exists:   true,
+				Computed: false,
+			},
+			false,
+		},
+
 		"mapelem": {
 			[]string{"map", "foo"},
 			FieldReadResult{
@@ -387,7 +457,7 @@ func testFieldReader(t *testing.T, f func(map[string]*Schema) FieldReader) {
 	for name, tc := range cases {
 		r := f(schema)
 		out, err := r.ReadField(tc.Addr)
-		if (err != nil) != tc.Err {
+		if err != nil != tc.Err {
 			t.Fatalf("%s: err: %s", name, err)
 		}
 		if s, ok := out.Value.(*Set); ok {

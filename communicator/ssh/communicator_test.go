@@ -3,14 +3,21 @@
 package ssh
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform/communicator/remote"
 	"github.com/hashicorp/terraform/terraform"
@@ -46,21 +53,26 @@ gqnBycHj6AhEycjda75cs+0zybZvN4x65KZHOGW/O/7OAWEcZP5TPb3zf9ned3Hl
 NsZoFj52ponUM6+99A2CmezFCN16c4mbA//luWF+k3VVqR6BpkrhKw==
 -----END RSA PRIVATE KEY-----`
 
-var serverConfig = &ssh.ServerConfig{
-	PasswordCallback:  acceptUserPass("user", "pass"),
-	PublicKeyCallback: acceptPublicKey(testClientPublicKey),
-}
+// this cert was signed by the key from testCAPublicKey
+const testServerHostCert = `ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgvQ3Bs1ex7277b9q6I0fNaWsVEC16f+LcT8RLPSVMEVMAAAADAQABAAABAQDX2UZWxOohPmKI1hGCehjULCRsRNblyr5HOTm/+ROV/fVelJTvQdVaRtMREQKNph1czaAZxtv6zGmroa1d/UzeRWibJyqHHCE+/gKvpenhZP+OQXH3P4UXOl6h0YlaM4fovYfm5fUK+v0QN1Cn2338nfb+oEWe1jwbChQj/L/UxJOYyIW26l0w4M3Tri93eDIwpPCuVDy1kzppi7I4+y60uVRjsznHkXAwNi+c8NJ7JP8jDTOzcH40LKp54x3ZPtjNAWdEBOPQzuszkuhKzsNWpWuI4QAGywXIuPfU9uhqguE4qByqgz2SGQ3OvsUdW+L4OFgzaMPQPC+pks3o2acvAAAAAAAAAAAAAAACAAAAB2NhLXRlc3QAAAANAAAACTEyNy4wLjAuMQAAAABag0jkAAAAAHDcHtAAAAAAAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQCrozyZIhdEvalCn+eSzHH94cO9ykiywA13ntWI7mJcHBwYTeCYWG8E9zGXyp2iDOjCGudM0Tdt8o0OofKChk9Z/qiUN0G8y1kmaXBlBM3qA5R9NPpvMYMNkYLfX6ivtZCnqrsbzaoqN2Oc/7H2StHzJWh/XCGu9otQZA6vdv1oSmAsZOjw/xIGaGQqDUaLq21J280PP1qSbdJHf76iSHE+TWe3YpqV946JWM5tCh0DykZ10VznvxYpUjzhr07IN3tVKxOXbPnnU7lX6IaLIWgfzLqwSyheeux05c3JLF9iF4sFu8ou4hwQz1iuUTU1jxgwZP0w/bkXgFFs0949lW81AAABDwAAAAdzc2gtcnNhAAABAEyoiVkZ5z79nh3WSU5mU2U7e2BItnnEqsJIm9EN+35uG0yORSXmQoaa9mtli7G3r79tyqEJd/C95EdNvU/9TjaoDcbH8OHP+Ue9XSfUzBuQ6bGSXe6mlZlO7QJ1cIyWphFP3MkrweDSiJ+SpeXzLzZkiJ7zKv5czhBEyG/MujFgvikotL+eUNG42y2cgsesXSjENSBS3l11q55a+RM2QKt3W32im8CsSxrH6Mz6p4JXQNgsVvZRknLxNlWXULFB2HLTunPKzJNMTf6xZf66oivSBAXVIdNKhlVpAQ3dT/dW5K6J4aQF/hjWByyLprFwZ16cPDqvtalnTCpbRYelNbw=`
 
-func init() {
-	// Parse and set the private key of the server, required to accept connections
-	signer, err := ssh.ParsePrivateKey([]byte(testServerPrivateKey))
-	if err != nil {
-		panic("unable to parse private key: " + err.Error())
+const testCAPublicKey = `ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCrozyZIhdEvalCn+eSzHH94cO9ykiywA13ntWI7mJcHBwYTeCYWG8E9zGXyp2iDOjCGudM0Tdt8o0OofKChk9Z/qiUN0G8y1kmaXBlBM3qA5R9NPpvMYMNkYLfX6ivtZCnqrsbzaoqN2Oc/7H2StHzJWh/XCGu9otQZA6vdv1oSmAsZOjw/xIGaGQqDUaLq21J280PP1qSbdJHf76iSHE+TWe3YpqV946JWM5tCh0DykZ10VznvxYpUjzhr07IN3tVKxOXbPnnU7lX6IaLIWgfzLqwSyheeux05c3JLF9iF4sFu8ou4hwQz1iuUTU1jxgwZP0w/bkXgFFs0949lW81`
+
+func newMockLineServer(t *testing.T, signer ssh.Signer) string {
+	serverConfig := &ssh.ServerConfig{
+		PasswordCallback:  acceptUserPass("user", "pass"),
+		PublicKeyCallback: acceptPublicKey(testClientPublicKey),
+	}
+
+	var err error
+	if signer == nil {
+		signer, err = ssh.ParsePrivateKey([]byte(testServerPrivateKey))
+		if err != nil {
+			t.Fatalf("unable to parse private key: %s", err)
+		}
 	}
 	serverConfig.AddHostKey(signer)
-}
 
-func newMockLineServer(t *testing.T) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Unable to listen for connection: %s", err)
@@ -107,7 +119,7 @@ func newMockLineServer(t *testing.T) string {
 }
 
 func TestNew_Invalid(t *testing.T) {
-	address := newMockLineServer(t)
+	address := newMockLineServer(t, nil)
 	parts := strings.Split(address, ":")
 
 	r := &terraform.InstanceState{
@@ -135,7 +147,7 @@ func TestNew_Invalid(t *testing.T) {
 }
 
 func TestStart(t *testing.T) {
-	address := newMockLineServer(t)
+	address := newMockLineServer(t, nil)
 	parts := strings.Split(address, ":")
 
 	r := &terraform.InstanceState{
@@ -167,25 +179,16 @@ func TestStart(t *testing.T) {
 	}
 }
 
-func TestStart_KeyFile(t *testing.T) {
-	address := newMockLineServer(t)
+func TestLostConnection(t *testing.T) {
+	address := newMockLineServer(t, nil)
 	parts := strings.Split(address, ":")
-
-	keyFile, err := ioutil.TempFile("", "tf")
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	keyFilePath := keyFile.Name()
-	keyFile.Write([]byte(testClientPrivateKey))
-	keyFile.Close()
-	defer os.Remove(keyFilePath)
 
 	r := &terraform.InstanceState{
 		Ephemeral: terraform.EphemeralState{
 			ConnInfo: map[string]string{
 				"type":     "ssh",
 				"user":     "user",
-				"key_file": keyFilePath,
+				"password": "pass",
 				"host":     parts[0],
 				"port":     parts[1],
 				"timeout":  "30s",
@@ -207,6 +210,272 @@ func TestStart_KeyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error executing remote command: %s", err)
 	}
+
+	// The test server can't execute anything, so Wait will block, unless
+	// there's an error.  Disconnect the communicator transport, to cause the
+	// command to fail.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		c.Disconnect()
+	}()
+
+	err = cmd.Wait()
+	if err == nil {
+		t.Fatal("expected communicator error")
+	}
+}
+
+func TestHostKey(t *testing.T) {
+	// get the server's public key
+	signer, err := ssh.ParsePrivateKey([]byte(testServerPrivateKey))
+	if err != nil {
+		panic("unable to parse private key: " + err.Error())
+	}
+	pubKey := fmt.Sprintf("ssh-rsa %s", base64.StdEncoding.EncodeToString(signer.PublicKey().Marshal()))
+
+	address := newMockLineServer(t, nil)
+	host, p, _ := net.SplitHostPort(address)
+	port, _ := strconv.Atoi(p)
+
+	connInfo := &connectionInfo{
+		User:     "user",
+		Password: "pass",
+		Host:     host,
+		HostKey:  pubKey,
+		Port:     port,
+		Timeout:  "30s",
+	}
+
+	cfg, err := prepareSSHConfig(connInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Communicator{
+		connInfo: connInfo,
+		config:   cfg,
+	}
+
+	var cmd remote.Cmd
+	stdout := new(bytes.Buffer)
+	cmd.Command = "echo foo"
+	cmd.Stdout = stdout
+
+	if err := c.Start(&cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+
+	// now check with the wrong HostKey
+	address = newMockLineServer(t, nil)
+	_, p, _ = net.SplitHostPort(address)
+	port, _ = strconv.Atoi(p)
+
+	connInfo.HostKey = testClientPublicKey
+	connInfo.Port = port
+
+	cfg, err = prepareSSHConfig(connInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c = &Communicator{
+		connInfo: connInfo,
+		config:   cfg,
+	}
+
+	err = c.Start(&cmd)
+	if err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("expected host key mismatch, got error:%v", err)
+	}
+}
+
+func TestHostCert(t *testing.T) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testServerHostCert))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := ssh.ParsePrivateKey([]byte(testServerPrivateKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err = ssh.NewCertSigner(pk.(*ssh.Certificate), signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	address := newMockLineServer(t, signer)
+	host, p, _ := net.SplitHostPort(address)
+	port, _ := strconv.Atoi(p)
+
+	connInfo := &connectionInfo{
+		User:     "user",
+		Password: "pass",
+		Host:     host,
+		HostKey:  testCAPublicKey,
+		Port:     port,
+		Timeout:  "30s",
+	}
+
+	cfg, err := prepareSSHConfig(connInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Communicator{
+		connInfo: connInfo,
+		config:   cfg,
+	}
+
+	var cmd remote.Cmd
+	stdout := new(bytes.Buffer)
+	cmd.Command = "echo foo"
+	cmd.Stdout = stdout
+
+	if err := c.Start(&cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+
+	// now check with the wrong HostKey
+	address = newMockLineServer(t, signer)
+	_, p, _ = net.SplitHostPort(address)
+	port, _ = strconv.Atoi(p)
+
+	connInfo.HostKey = testClientPublicKey
+	connInfo.Port = port
+
+	cfg, err = prepareSSHConfig(connInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c = &Communicator{
+		connInfo: connInfo,
+		config:   cfg,
+	}
+
+	err = c.Start(&cmd)
+	if err == nil || !strings.Contains(err.Error(), "authorities") {
+		t.Fatalf("expected host key mismatch, got error:%v", err)
+	}
+}
+
+func TestAccUploadFile(t *testing.T) {
+	// use the local ssh server and scp binary to check uploads
+	if ok := os.Getenv("SSH_UPLOAD_TEST"); ok == "" {
+		t.Log("Skipping Upload Acceptance without SSH_UPLOAD_TEST set")
+		t.Skip()
+	}
+
+	r := &terraform.InstanceState{
+		Ephemeral: terraform.EphemeralState{
+			ConnInfo: map[string]string{
+				"type":    "ssh",
+				"user":    os.Getenv("USER"),
+				"host":    "127.0.0.1",
+				"port":    "22",
+				"timeout": "30s",
+			},
+		},
+	}
+
+	c, err := New(r)
+	if err != nil {
+		t.Fatalf("error creating communicator: %s", err)
+	}
+
+	tmpDir, err := ioutil.TempDir("", "communicator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	content := []byte("this is the file content")
+	source := bytes.NewReader(content)
+	tmpFile := filepath.Join(tmpDir, "tempFile.out")
+	err = c.Upload(tmpFile, source)
+	if err != nil {
+		t.Fatalf("error uploading file: %s", err)
+	}
+
+	data, err := ioutil.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(data, content) {
+		t.Fatalf("bad: %s", data)
+	}
+}
+
+func TestAccHugeUploadFile(t *testing.T) {
+	// use the local ssh server and scp binary to check uploads
+	if ok := os.Getenv("SSH_UPLOAD_TEST"); ok == "" {
+		t.Log("Skipping Upload Acceptance without SSH_UPLOAD_TEST set")
+		t.Skip()
+	}
+
+	r := &terraform.InstanceState{
+		Ephemeral: terraform.EphemeralState{
+			ConnInfo: map[string]string{
+				"type":    "ssh",
+				"user":    os.Getenv("USER"),
+				"host":    "127.0.0.1",
+				"port":    "22",
+				"timeout": "30s",
+			},
+		},
+	}
+
+	c, err := New(r)
+	if err != nil {
+		t.Fatalf("error creating communicator: %s", err)
+	}
+
+	// copy 4GB of data, random to prevent compression.
+	size := int64(1 << 32)
+	source := io.LimitReader(rand.New(rand.NewSource(0)), size)
+
+	dest, err := ioutil.TempFile("", "communicator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destName := dest.Name()
+	dest.Close()
+	defer os.Remove(destName)
+
+	t.Log("Uploading to", destName)
+
+	// bypass the Upload method so we can directly supply the file size
+	// preventing the extra copy of the huge file.
+	targetDir := filepath.Dir(destName)
+	targetFile := filepath.Base(destName)
+
+	scpFunc := func(w io.Writer, stdoutR *bufio.Reader) error {
+		return scpUploadFile(targetFile, source, w, stdoutR, size)
+	}
+
+	err = c.scpSession("scp -vt "+targetDir, scpFunc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// check the final file size
+	fs, err := os.Stat(destName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if fs.Size() != size {
+		t.Fatalf("expected file size of %d, got %d", size, fs.Size())
+	}
 }
 
 func TestScriptPath(t *testing.T) {
@@ -225,7 +494,18 @@ func TestScriptPath(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		comm := &Communicator{connInfo: &connectionInfo{ScriptPath: tc.Input}}
+		r := &terraform.InstanceState{
+			Ephemeral: terraform.EphemeralState{
+				ConnInfo: map[string]string{
+					"type":        "ssh",
+					"script_path": tc.Input,
+				},
+			},
+		}
+		comm, err := New(r)
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
 		output := comm.ScriptPath()
 
 		match, err := regexp.Match(tc.Pattern, []byte(output))
@@ -235,6 +515,20 @@ func TestScriptPath(t *testing.T) {
 		if !match {
 			t.Fatalf("bad: %s\n\n%s", tc.Input, output)
 		}
+	}
+}
+
+func TestScriptPath_randSeed(t *testing.T) {
+	// Pre GH-4186 fix, this value was the deterministic start the pseudorandom
+	// chain of unseeded math/rand values for Int31().
+	staticSeedPath := "/tmp/terraform_1298498081.sh"
+	c, err := New(&terraform.InstanceState{})
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	path := c.ScriptPath()
+	if path == staticSeedPath {
+		t.Fatalf("rand not seeded! got: %s", path)
 	}
 }
 
@@ -283,7 +577,7 @@ func acceptPublicKey(keystr string) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.
 		panic(fmt.Errorf("error parsing key: %s", err))
 	}
 	return func(_ ssh.ConnMetadata, inkey ssh.PublicKey) (*ssh.Permissions, error) {
-		if bytes.Compare(inkey.Marshal(), goodkey.Marshal()) == 0 {
+		if bytes.Equal(inkey.Marshal(), goodkey.Marshal()) {
 			return nil, nil
 		}
 

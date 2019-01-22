@@ -7,9 +7,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/terraform/config/module"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/go-getter"
+	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/config/hcl2shim"
+	"github.com/hashicorp/terraform/repl"
+	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
 // ApplyCommand is a Command implementation that applies a Terraform
@@ -20,63 +24,67 @@ type ApplyCommand struct {
 	// If true, then this apply command will become the "destroy"
 	// command. It is just like apply but only processes a destroy.
 	Destroy bool
-
-	// When this channel is closed, the apply will be cancelled.
-	ShutdownCh <-chan struct{}
 }
 
 func (c *ApplyCommand) Run(args []string) int {
-	var destroyForce, refresh bool
-	args = c.Meta.process(args, true)
+	var destroyForce, refresh, autoApprove bool
+	args, err := c.Meta.process(args, true)
+	if err != nil {
+		return 1
+	}
 
 	cmdName := "apply"
 	if c.Destroy {
 		cmdName = "destroy"
 	}
 
-	cmdFlags := c.Meta.flagSet(cmdName)
+	cmdFlags := c.Meta.extendedFlagSet(cmdName)
+	cmdFlags.BoolVar(&autoApprove, "auto-approve", false, "skip interactive approval of plan before applying")
 	if c.Destroy {
-		cmdFlags.BoolVar(&destroyForce, "force", false, "force")
+		cmdFlags.BoolVar(&destroyForce, "force", false, "deprecated: same as auto-approve")
 	}
 	cmdFlags.BoolVar(&refresh, "refresh", true, "refresh")
-	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
+	cmdFlags.IntVar(&c.Meta.parallelism, "parallelism", DefaultParallelism, "parallelism")
+	cmdFlags.StringVar(&c.Meta.statePath, "state", "", "path")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
-	pwd, err := os.Getwd()
-	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
-		return 1
-	}
+	var diags tfdiags.Diagnostics
 
-	var configPath string
-	maybeInit := true
+	// Get the args. The "maybeInit" flag tracks whether we may need to
+	// initialize the configuration from a remote path. This is true as long
+	// as we have an argument.
 	args = cmdFlags.Args()
-	if len(args) > 1 {
-		c.Ui.Error("The apply command expects at most one argument.")
-		cmdFlags.Usage()
+	maybeInit := len(args) == 1
+	configPath, err := ModulePath(args)
+	if err != nil {
+		c.Ui.Error(err.Error())
 		return 1
-	} else if len(args) == 1 {
-		configPath = args[0]
-	} else {
-		configPath = pwd
-		maybeInit = false
 	}
 
-	// Prepare the extra hooks to count resources
-	countHook := new(CountHook)
-	stateHook := new(StateHook)
-	c.Meta.extraHooks = []terraform.Hook{countHook, stateHook}
+	// Check for user-supplied plugin path
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
+		return 1
+	}
 
 	if !c.Destroy && maybeInit {
+		// We need the pwd for the getter operation below
+		pwd, err := os.Getwd()
+		if err != nil {
+			c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
+			return 1
+		}
+
 		// Do a detect to determine if we need to do an init + apply.
-		if detected, err := module.Detect(configPath, pwd); err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Invalid path: %s", err))
+		if detected, err := getter.Detect(configPath, pwd, getter.Detectors); err != nil {
+			c.Ui.Error(fmt.Sprintf("Invalid path: %s", err))
 			return 1
 		} else if !strings.HasPrefix(detected, "file") {
 			// If this isn't a file URL then we're doing an init +
@@ -92,151 +100,122 @@ func (c *ApplyCommand) Run(args []string) int {
 		}
 	}
 
-	// Build the context based on the arguments given
-	ctx, planned, err := c.Context(contextOpts{
-		Destroy:   c.Destroy,
-		Path:      configPath,
-		StatePath: c.Meta.statePath,
-	})
+	// Check if the path is a plan
+	planFile, err := c.PlanFile(configPath)
 	if err != nil {
 		c.Ui.Error(err.Error())
 		return 1
 	}
-	if c.Destroy && planned {
-		c.Ui.Error(fmt.Sprintf(
-			"Destroy can't be called with a plan file."))
+	if c.Destroy && planFile != nil {
+		c.Ui.Error(fmt.Sprintf("Destroy can't be called with a plan file."))
 		return 1
 	}
-	if !destroyForce && c.Destroy {
-		v, err := c.UIInput().Input(&terraform.InputOpts{
-			Id:    "destroy",
-			Query: "Do you really want to destroy?",
-			Description: "Terraform will delete all your managed infrastructure.\n" +
-				"There is no undo. Only 'yes' will be accepted to confirm.",
+	if planFile != nil {
+		// Reset the config path for backend loading
+		configPath = ""
+
+		if !c.variableArgs.Empty() {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Can't set variables when applying a saved plan",
+				"The -var and -var-file options cannot be used when applying a saved plan file, because a saved plan includes the variable values that were set when it was created.",
+			))
+			c.showDiagnostics(diags)
+			return 1
+		}
+	}
+
+	// Load the backend
+	var be backend.Enhanced
+	var beDiags tfdiags.Diagnostics
+	if planFile == nil {
+		backendConfig, configDiags := c.loadBackendConfig(configPath)
+		diags = diags.Append(configDiags)
+		if configDiags.HasErrors() {
+			c.showDiagnostics(diags)
+			return 1
+		}
+
+		be, beDiags = c.Backend(&BackendOpts{
+			Config: backendConfig,
 		})
+	} else {
+		plan, err := planFile.ReadPlan()
 		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error asking for confirmation: %s", err))
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Failed to read plan from plan file",
+				fmt.Sprintf("Cannot read the plan from the given plan file: %s.", err),
+			))
+			c.showDiagnostics(diags)
 			return 1
 		}
-		if v != "yes" {
-			c.Ui.Output("Destroy cancelled.")
+		if plan.Backend.Config == nil {
+			// Should never happen; always indicates a bug in the creation of the plan file
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Failed to read plan from plan file",
+				fmt.Sprintf("The given plan file does not have a valid backend configuration. This is a bug in the Terraform command that generated this plan file."),
+			))
+			c.showDiagnostics(diags)
 			return 1
 		}
+		be, beDiags = c.BackendForPlan(plan.Backend)
 	}
-	if !planned {
-		if err := ctx.Input(c.InputMode()); err != nil {
-			c.Ui.Error(fmt.Sprintf("Error configuring: %s", err))
-			return 1
-		}
-	}
-	if !validateContext(ctx, c.Ui) {
+	diags = diags.Append(beDiags)
+	if beDiags.HasErrors() {
+		c.showDiagnostics(diags)
 		return 1
 	}
 
-	// Plan if we haven't already
-	if !planned {
-		if refresh {
-			if _, err := ctx.Refresh(); err != nil {
-				c.Ui.Error(fmt.Sprintf("Error refreshing state: %s", err))
-				return 1
-			}
-		}
+	// Before we delegate to the backend, we'll print any warning diagnostics
+	// we've accumulated here, since the backend will start fresh with its own
+	// diagnostics.
+	c.showDiagnostics(diags)
+	diags = nil
 
-		if _, err := ctx.Plan(); err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Error creating plan: %s", err))
-			return 1
-		}
+	// Build the operation
+	opReq := c.Operation(be)
+	opReq.AutoApprove = autoApprove
+	opReq.ConfigDir = configPath
+	opReq.Destroy = c.Destroy
+	opReq.DestroyForce = destroyForce
+	opReq.PlanFile = planFile
+	opReq.PlanRefresh = refresh
+	opReq.Type = backend.OperationTypeApply
+
+	opReq.ConfigLoader, err = c.initConfigLoader()
+	if err != nil {
+		c.showDiagnostics(err)
+		return 1
 	}
 
-	// Setup the state hook for continuous state updates
 	{
-		state, err := c.State()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf(
-				"Error reading state: %s", err))
-			return 1
-		}
-
-		stateHook.State = state
-	}
-
-	// Start the apply in a goroutine so that we can be interrupted.
-	var state *terraform.State
-	var applyErr error
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		state, applyErr = ctx.Apply()
-	}()
-
-	// Wait for the apply to finish or for us to be interrupted so
-	// we can handle it properly.
-	err = nil
-	select {
-	case <-c.ShutdownCh:
-		c.Ui.Output("Interrupt received. Gracefully shutting down...")
-
-		// Stop execution
-		go ctx.Stop()
-
-		// Still get the result, since there is still one
-		select {
-		case <-c.ShutdownCh:
-			c.Ui.Error(
-				"Two interrupts received. Exiting immediately. Note that data\n" +
-					"loss may have occurred.")
-			return 1
-		case <-doneCh:
-		}
-	case <-doneCh:
-	}
-
-	// Persist the state
-	if state != nil {
-		if err := c.Meta.PersistState(state); err != nil {
-			c.Ui.Error(fmt.Sprintf("Failed to save state: %s", err))
+		var moreDiags tfdiags.Diagnostics
+		opReq.Variables, moreDiags = c.collectVariableValues()
+		diags = diags.Append(moreDiags)
+		if moreDiags.HasErrors() {
+			c.showDiagnostics(diags)
 			return 1
 		}
 	}
 
-	if applyErr != nil {
-		c.Ui.Error(fmt.Sprintf(
-			"Error applying plan:\n\n"+
-				"%s\n\n"+
-				"Terraform does not automatically rollback in the face of errors.\n"+
-				"Instead, your Terraform state file has been partially updated with\n"+
-				"any resources that successfully completed. Please address the error\n"+
-				"above and apply again to incrementally change your infrastructure.",
-			multierror.Flatten(applyErr)))
+	op, err := c.RunOperation(be, opReq)
+	if err != nil {
+		c.showDiagnostics(err)
 		return 1
 	}
-
-	c.Ui.Output(c.Colorize().Color(fmt.Sprintf(
-		"[reset][bold][green]\n"+
-			"Apply complete! Resources: %d added, %d changed, %d destroyed.",
-		countHook.Added,
-		countHook.Changed,
-		countHook.Removed)))
-
-	if countHook.Added > 0 || countHook.Changed > 0 {
-		c.Ui.Output(c.Colorize().Color(fmt.Sprintf(
-			"[reset]\n"+
-				"The state of your infrastructure has been saved to the path\n"+
-				"below. This state is required to modify and destroy your\n"+
-				"infrastructure, so keep it safe. To inspect the complete state\n"+
-				"use the `terraform show` command.\n\n"+
-				"State path: %s",
-			c.Meta.StateOutPath())))
+	if op.Result != backend.OperationSuccess {
+		return op.Result.ExitStatus()
 	}
 
 	if !c.Destroy {
-		if outputs := outputsAsString(state); outputs != "" {
+		if outputs := outputsAsString(op.State, addrs.RootModuleInstance, true); outputs != "" {
 			c.Ui.Output(c.Colorize().Color(outputs))
 		}
 	}
 
-	return 0
+	return op.Result.ExitStatus()
 }
 
 func (c *ApplyCommand) Help() string {
@@ -257,16 +236,15 @@ func (c *ApplyCommand) Synopsis() string {
 
 func (c *ApplyCommand) helpApply() string {
 	helpText := `
-Usage: terraform apply [options] [DIR]
+Usage: terraform apply [options] [DIR-OR-PLAN]
 
   Builds or changes infrastructure according to Terraform configuration
   files in DIR.
 
-  DIR can also be a SOURCE as given to the "init" command. In this case,
-  apply behaves as though "init" was called followed by "apply". This only
-  works for sources that aren't files, and only if the current working
-  directory is empty of Terraform files. This is a shortcut for getting
-  started.
+  By default, apply scans the current directory for the configuration
+  and applies the changes appropriately. However, a path to another
+  configuration or an execution plan can be provided. Execution plans can be
+  used to only execute a pre-determined set of actions.
 
 Options:
 
@@ -274,9 +252,18 @@ Options:
                          modifying. Defaults to the "-state-out" path with
                          ".backup" extension. Set to "-" to disable backup.
 
+  -auto-approve          Skip interactive approval of plan before applying.
+
+  -lock=true             Lock the state file when locking is supported.
+
+  -lock-timeout=0s       Duration to retry a state lock.
+
   -input=true            Ask for input for variables if not directly set.
 
   -no-color              If specified, output won't contain any color.
+
+  -parallelism=n         Limit the number of parallel resource operations.
+                         Defaults to 10.
 
   -refresh=true          Update state prior to checking for differences. This
                          has no effect if a plan file is given to apply.
@@ -296,8 +283,8 @@ Options:
                          flag can be set multiple times.
 
   -var-file=foo          Set variables in the Terraform configuration from
-                         a file. If "terraform.tfvars" is present, it will be
-                         automatically loaded if this flag is not specified.
+                         a file. If "terraform.tfvars" or any ".auto.tfvars"
+                         files are present, they will be automatically loaded.
 
 
 `
@@ -316,9 +303,18 @@ Options:
                          modifying. Defaults to the "-state-out" path with
                          ".backup" extension. Set to "-" to disable backup.
 
-  -force                 Don't ask for input for destroy confirmation.
+  -auto-approve          Skip interactive approval before destroying.
+
+  -force                 Deprecated: same as auto-approve.
+
+  -lock=true             Lock the state file when locking is supported.
+
+  -lock-timeout=0s       Duration to retry a state lock.
 
   -no-color              If specified, output won't contain any color.
+
+  -parallelism=n         Limit the number of concurrent operations.
+                         Defaults to 10.
 
   -refresh=true          Update state prior to checking for differences. This
                          has no effect if a plan file is given to apply.
@@ -338,45 +334,67 @@ Options:
                          flag can be set multiple times.
 
   -var-file=foo          Set variables in the Terraform configuration from
-                         a file. If "terraform.tfvars" is present, it will be
-                         automatically loaded if this flag is not specified.
+                         a file. If "terraform.tfvars" or any ".auto.tfvars"
+                         files are present, they will be automatically loaded.
 
 
 `
 	return strings.TrimSpace(helpText)
 }
 
-func outputsAsString(state *terraform.State) string {
+func outputsAsString(state *states.State, modPath addrs.ModuleInstance, includeHeader bool) string {
 	if state == nil {
 		return ""
 	}
 
-	outputs := state.RootModule().Outputs
+	ms := state.Module(modPath)
+	if ms == nil {
+		return ""
+	}
+
+	outputs := ms.OutputValues
 	outputBuf := new(bytes.Buffer)
 	if len(outputs) > 0 {
-		outputBuf.WriteString("[reset][bold][green]\nOutputs:\n\n")
+		if includeHeader {
+			outputBuf.WriteString("[reset][bold][green]\nOutputs:\n\n")
+		}
 
 		// Output the outputs in alphabetical order
 		keyLen := 0
-		keys := make([]string, 0, len(outputs))
+		ks := make([]string, 0, len(outputs))
 		for key, _ := range outputs {
-			keys = append(keys, key)
+			ks = append(ks, key)
 			if len(key) > keyLen {
 				keyLen = len(key)
 			}
 		}
-		sort.Strings(keys)
+		sort.Strings(ks)
 
-		for _, k := range keys {
+		for _, k := range ks {
 			v := outputs[k]
+			if v.Sensitive {
+				outputBuf.WriteString(fmt.Sprintf("%s = <sensitive>\n", k))
+				continue
+			}
 
-			outputBuf.WriteString(fmt.Sprintf(
-				"  %s%s = %s\n",
-				k,
-				strings.Repeat(" ", keyLen-len(k)),
-				v))
+			// Our formatter still wants an old-style raw interface{} value, so
+			// for now we'll just shim it.
+			// FIXME: Port the formatter to work with cty.Value directly.
+			legacyVal := hcl2shim.ConfigValueFromHCL2(v.Value)
+			result, err := repl.FormatResult(legacyVal)
+			if err != nil {
+				// We can't really return errors from here, so we'll just have
+				// to stub this out. This shouldn't happen in practice anyway.
+				result = "<error during formatting>"
+			}
+
+			outputBuf.WriteString(fmt.Sprintf("%s = %s\n", k, result))
 		}
 	}
 
 	return strings.TrimSpace(outputBuf.String())
 }
+
+const outputInterrupt = `Interrupt received.
+Please wait for Terraform to exit or data loss may occur.
+Gracefully shutting down...`

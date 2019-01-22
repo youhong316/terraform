@@ -1,3 +1,4 @@
+//go:generate go run ./scripts/generate-plugins.go
 package main
 
 import (
@@ -5,15 +6,16 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/hashicorp/hcl"
-	"github.com/hashicorp/terraform/plugin"
-	"github.com/hashicorp/terraform/terraform"
-	"github.com/mitchellh/osext"
+
+	"github.com/hashicorp/terraform/command"
+	"github.com/hashicorp/terraform/svchost"
+	"github.com/hashicorp/terraform/tfdiags"
 )
+
+const pluginCacheDirEnvVar = "TF_PLUGIN_CACHE_DIR"
 
 // Config is the structure of the configuration for the Terraform CLI.
 //
@@ -25,14 +27,37 @@ type Config struct {
 
 	DisableCheckpoint          bool `hcl:"disable_checkpoint"`
 	DisableCheckpointSignature bool `hcl:"disable_checkpoint_signature"`
+
+	// If set, enables local caching of plugins in this directory to
+	// avoid repeatedly re-downloading over the Internet.
+	PluginCacheDir string `hcl:"plugin_cache_dir"`
+
+	Hosts map[string]*ConfigHost `hcl:"host"`
+
+	Credentials        map[string]map[string]interface{}   `hcl:"credentials"`
+	CredentialsHelpers map[string]*ConfigCredentialsHelper `hcl:"credentials_helper"`
+}
+
+// ConfigHost is the structure of the "host" nested block within the CLI
+// configuration, which can be used to override the default service host
+// discovery behavior for a particular hostname.
+type ConfigHost struct {
+	Services map[string]interface{} `hcl:"services"`
+}
+
+// ConfigCredentialsHelper is the structure of the "credentials_helper"
+// nested block within the CLI configuration.
+type ConfigCredentialsHelper struct {
+	Args []string `hcl:"args"`
 }
 
 // BuiltinConfig is the built-in defaults for the configuration. These
 // can be overridden by user configurations.
 var BuiltinConfig Config
 
-// ContextOpts are the global ContextOpts we use to initialize the CLI.
-var ContextOpts terraform.ContextOpts
+// PluginOverrides are paths that override discovered plugins, set from
+// the config file.
+var PluginOverrides command.PluginOverrides
 
 // ConfigFile returns the default path to the configuration file.
 //
@@ -48,64 +73,174 @@ func ConfigDir() (string, error) {
 	return configDir()
 }
 
-// LoadConfig loads the CLI configuration from ".terraformrc" files.
-func LoadConfig(path string) (*Config, error) {
+// LoadConfig reads the CLI configuration from the various filesystem locations
+// and from the environment, returning a merged configuration along with any
+// diagnostics (errors and warnings) encountered along the way.
+func LoadConfig() (*Config, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+	configVal := BuiltinConfig // copy
+	config := &configVal
+
+	if mainFilename, err := cliConfigFile(); err == nil {
+		if _, err := os.Stat(mainFilename); err == nil {
+			mainConfig, mainDiags := loadConfigFile(mainFilename)
+			diags = diags.Append(mainDiags)
+			config = config.Merge(mainConfig)
+		}
+	}
+
+	if configDir, err := ConfigDir(); err == nil {
+		if info, err := os.Stat(configDir); err == nil && info.IsDir() {
+			dirConfig, dirDiags := loadConfigDir(configDir)
+			diags = diags.Append(dirDiags)
+			config = config.Merge(dirConfig)
+		}
+	}
+
+	if envConfig := EnvConfig(); envConfig != nil {
+		// envConfig takes precedence
+		config = envConfig.Merge(config)
+	}
+
+	diags = diags.Append(config.Validate())
+
+	return config, diags
+}
+
+// loadConfigFile loads the CLI configuration from ".terraformrc" files.
+func loadConfigFile(path string) (*Config, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+	result := &Config{}
+
+	log.Printf("Loading CLI configuration from %s", path)
+
 	// Read the HCL file and prepare for parsing
 	d, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"Error reading %s: %s", path, err)
+		diags = diags.Append(fmt.Errorf("Error reading %s: %s", path, err))
+		return result, diags
 	}
 
 	// Parse it
 	obj, err := hcl.Parse(string(d))
 	if err != nil {
-		return nil, fmt.Errorf(
-			"Error parsing %s: %s", path, err)
+		diags = diags.Append(fmt.Errorf("Error parsing %s: %s", path, err))
+		return result, diags
 	}
 
 	// Build up the result
-	var result Config
 	if err := hcl.DecodeObject(&result, obj); err != nil {
-		return nil, err
+		diags = diags.Append(fmt.Errorf("Error parsing %s: %s", path, err))
+		return result, diags
 	}
 
-	return &result, nil
+	// Replace all env vars
+	for k, v := range result.Providers {
+		result.Providers[k] = os.ExpandEnv(v)
+	}
+	for k, v := range result.Provisioners {
+		result.Provisioners[k] = os.ExpandEnv(v)
+	}
+
+	if result.PluginCacheDir != "" {
+		result.PluginCacheDir = os.ExpandEnv(result.PluginCacheDir)
+	}
+
+	return result, diags
 }
 
-// Discover discovers plugins.
+func loadConfigDir(path string) (*Config, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+	result := &Config{}
+
+	entries, err := ioutil.ReadDir(path)
+	if err != nil {
+		diags = diags.Append(fmt.Errorf("Error reading %s: %s", path, err))
+		return result, diags
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		// Ignoring errors here because it is used only to indicate pattern
+		// syntax errors, and our patterns are hard-coded here.
+		hclMatched, _ := filepath.Match("*.tfrc", name)
+		jsonMatched, _ := filepath.Match("*.tfrc.json", name)
+		if !(hclMatched || jsonMatched) {
+			continue
+		}
+
+		filePath := filepath.Join(path, name)
+		fileConfig, fileDiags := loadConfigFile(filePath)
+		diags = diags.Append(fileDiags)
+		result = result.Merge(fileConfig)
+	}
+
+	return result, diags
+}
+
+// EnvConfig returns a Config populated from environment variables.
 //
-// This looks in the directory of the executable and the CWD, in that
-// order for priority.
-func (c *Config) Discover() error {
-	// Look in the cwd.
-	if err := c.discover("."); err != nil {
-		return err
+// Any values specified in this config should override those set in the
+// configuration file.
+func EnvConfig() *Config {
+	config := &Config{}
+
+	if envPluginCacheDir := os.Getenv(pluginCacheDirEnvVar); envPluginCacheDir != "" {
+		// No Expandenv here, because expanding environment variables inside
+		// an environment variable would be strange and seems unnecessary.
+		// (User can expand variables into the value while setting it using
+		// standard shell features.)
+		config.PluginCacheDir = envPluginCacheDir
 	}
 
-	// Look in the plugins directory. This will override any found
-	// in the current directory.
-	dir, err := ConfigDir()
-	if err != nil {
-		log.Printf("[ERR] Error loading config directory: %s", err)
-	} else {
-		if err := c.discover(filepath.Join(dir, "plugins")); err != nil {
-			return err
+	return config
+}
+
+// Validate checks for errors in the configuration that cannot be detected
+// just by HCL decoding, returning any problems as diagnostics.
+//
+// On success, the returned diagnostics will return false from the HasErrors
+// method. A non-nil diagnostics is not necessarily an error, since it may
+// contain just warnings.
+func (c *Config) Validate() tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+
+	if c == nil {
+		return diags
+	}
+
+	// FIXME: Right now our config parsing doesn't retain enough information
+	// to give proper source references to any errors. We should improve
+	// on this when we change the CLI config parser to use HCL2.
+
+	// Check that all "host" blocks have valid hostnames.
+	for givenHost := range c.Hosts {
+		_, err := svchost.ForComparison(givenHost)
+		if err != nil {
+			diags = diags.Append(
+				fmt.Errorf("The host %q block has an invalid hostname: %s", givenHost, err),
+			)
 		}
 	}
 
-	// Next, look in the same directory as the executable. Any conflicts
-	// will overwrite those found in our current directory.
-	exePath, err := osext.Executable()
-	if err != nil {
-		log.Printf("[ERR] Error loading exe directory: %s", err)
-	} else {
-		if err := c.discover(filepath.Dir(exePath)); err != nil {
-			return err
+	// Check that all "credentials" blocks have valid hostnames.
+	for givenHost := range c.Credentials {
+		_, err := svchost.ForComparison(givenHost)
+		if err != nil {
+			diags = diags.Append(
+				fmt.Errorf("The credentials %q block has an invalid hostname: %s", givenHost, err),
+			)
 		}
 	}
 
-	return nil
+	// Should have zero or one "credentials_helper" blocks
+	if len(c.CredentialsHelpers) > 1 {
+		diags = diags.Append(
+			fmt.Errorf("No more than one credentials_helper block may be specified"),
+		)
+	}
+
+	return diags
 }
 
 // Merge merges two configurations and returns a third entirely
@@ -118,164 +253,60 @@ func (c1 *Config) Merge(c2 *Config) *Config {
 		result.Providers[k] = v
 	}
 	for k, v := range c2.Providers {
+		if v1, ok := c1.Providers[k]; ok {
+			log.Printf("[INFO] Local %s provider configuration '%s' overrides '%s'", k, v, v1)
+		}
 		result.Providers[k] = v
 	}
 	for k, v := range c1.Provisioners {
 		result.Provisioners[k] = v
 	}
 	for k, v := range c2.Provisioners {
+		if v1, ok := c1.Provisioners[k]; ok {
+			log.Printf("[INFO] Local %s provisioner configuration '%s' overrides '%s'", k, v, v1)
+		}
 		result.Provisioners[k] = v
+	}
+	result.DisableCheckpoint = c1.DisableCheckpoint || c2.DisableCheckpoint
+	result.DisableCheckpointSignature = c1.DisableCheckpointSignature || c2.DisableCheckpointSignature
+
+	result.PluginCacheDir = c1.PluginCacheDir
+	if result.PluginCacheDir == "" {
+		result.PluginCacheDir = c2.PluginCacheDir
+	}
+
+	if (len(c1.Hosts) + len(c2.Hosts)) > 0 {
+		result.Hosts = make(map[string]*ConfigHost)
+		for name, host := range c1.Hosts {
+			result.Hosts[name] = host
+		}
+		for name, host := range c2.Hosts {
+			result.Hosts[name] = host
+		}
+	}
+
+	if (len(c1.Credentials) + len(c2.Credentials)) > 0 {
+		result.Credentials = make(map[string]map[string]interface{})
+		for host, creds := range c1.Credentials {
+			result.Credentials[host] = creds
+		}
+		for host, creds := range c2.Credentials {
+			// We just clobber an entry from the other file right now. Will
+			// improve on this later using the more-robust merging behavior
+			// built in to HCL2.
+			result.Credentials[host] = creds
+		}
+	}
+
+	if (len(c1.CredentialsHelpers) + len(c2.CredentialsHelpers)) > 0 {
+		result.CredentialsHelpers = make(map[string]*ConfigCredentialsHelper)
+		for name, helper := range c1.CredentialsHelpers {
+			result.CredentialsHelpers[name] = helper
+		}
+		for name, helper := range c2.CredentialsHelpers {
+			result.CredentialsHelpers[name] = helper
+		}
 	}
 
 	return &result
-}
-
-func (c *Config) discover(path string) error {
-	var err error
-
-	if !filepath.IsAbs(path) {
-		path, err = filepath.Abs(path)
-		if err != nil {
-			return err
-		}
-	}
-
-	err = c.discoverSingle(
-		filepath.Join(path, "terraform-provider-*"), &c.Providers)
-	if err != nil {
-		return err
-	}
-
-	err = c.discoverSingle(
-		filepath.Join(path, "terraform-provisioner-*"), &c.Provisioners)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Config) discoverSingle(glob string, m *map[string]string) error {
-	matches, err := filepath.Glob(glob)
-	if err != nil {
-		return err
-	}
-
-	if *m == nil {
-		*m = make(map[string]string)
-	}
-
-	for _, match := range matches {
-		file := filepath.Base(match)
-
-		// If the filename has a ".", trim up to there
-		if idx := strings.Index(file, "."); idx >= 0 {
-			file = file[:idx]
-		}
-
-		// Look for foo-bar-baz. The plugin name is "baz"
-		parts := strings.SplitN(file, "-", 3)
-		if len(parts) != 3 {
-			continue
-		}
-
-		log.Printf("[DEBUG] Discovered plugin: %s = %s", parts[2], match)
-		(*m)[parts[2]] = match
-	}
-
-	return nil
-}
-
-// ProviderFactories returns the mapping of prefixes to
-// ResourceProviderFactory that can be used to instantiate a
-// binary-based plugin.
-func (c *Config) ProviderFactories() map[string]terraform.ResourceProviderFactory {
-	result := make(map[string]terraform.ResourceProviderFactory)
-	for k, v := range c.Providers {
-		result[k] = c.providerFactory(v)
-	}
-
-	return result
-}
-
-func (c *Config) providerFactory(path string) terraform.ResourceProviderFactory {
-	// Build the plugin client configuration and init the plugin
-	var config plugin.ClientConfig
-	config.Cmd = pluginCmd(path)
-	config.Managed = true
-	client := plugin.NewClient(&config)
-
-	return func() (terraform.ResourceProvider, error) {
-		// Request the RPC client so we can get the provider
-		// so we can build the actual RPC-implemented provider.
-		rpcClient, err := client.Client()
-		if err != nil {
-			return nil, err
-		}
-
-		return rpcClient.ResourceProvider()
-	}
-}
-
-// ProvisionerFactories returns the mapping of prefixes to
-// ResourceProvisionerFactory that can be used to instantiate a
-// binary-based plugin.
-func (c *Config) ProvisionerFactories() map[string]terraform.ResourceProvisionerFactory {
-	result := make(map[string]terraform.ResourceProvisionerFactory)
-	for k, v := range c.Provisioners {
-		result[k] = c.provisionerFactory(v)
-	}
-
-	return result
-}
-
-func (c *Config) provisionerFactory(path string) terraform.ResourceProvisionerFactory {
-	// Build the plugin client configuration and init the plugin
-	var config plugin.ClientConfig
-	config.Cmd = pluginCmd(path)
-	config.Managed = true
-	client := plugin.NewClient(&config)
-
-	return func() (terraform.ResourceProvisioner, error) {
-		rpcClient, err := client.Client()
-		if err != nil {
-			return nil, err
-		}
-
-		return rpcClient.ResourceProvisioner()
-	}
-}
-
-func pluginCmd(path string) *exec.Cmd {
-	cmdPath := ""
-
-	// If the path doesn't contain a separator, look in the same
-	// directory as the Terraform executable first.
-	if !strings.ContainsRune(path, os.PathSeparator) {
-		exePath, err := osext.Executable()
-		if err == nil {
-			temp := filepath.Join(
-				filepath.Dir(exePath),
-				filepath.Base(path))
-
-			if _, err := os.Stat(temp); err == nil {
-				cmdPath = temp
-			}
-		}
-
-		// If we still haven't found the executable, look for it
-		// in the PATH.
-		if v, err := exec.LookPath(path); err == nil {
-			cmdPath = v
-		}
-	}
-
-	// If we still don't have a path, then just set it to the original
-	// given path.
-	if cmdPath == "" {
-		cmdPath = path
-	}
-
-	// Build the command to execute the plugin
-	return exec.Command(cmdPath)
 }

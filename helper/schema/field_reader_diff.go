@@ -29,29 +29,59 @@ type DiffFieldReader struct {
 	Diff   *terraform.InstanceDiff
 	Source FieldReader
 	Schema map[string]*Schema
+
+	// cache for memoizing ReadField calls.
+	cache map[string]cachedFieldReadResult
+}
+
+type cachedFieldReadResult struct {
+	val FieldReadResult
+	err error
 }
 
 func (r *DiffFieldReader) ReadField(address []string) (FieldReadResult, error) {
+	if r.cache == nil {
+		r.cache = make(map[string]cachedFieldReadResult)
+	}
+
+	// Create the cache key by joining around a value that isn't a valid part
+	// of an address. This assumes that the Source and Schema are not changed
+	// for the life of this DiffFieldReader.
+	cacheKey := strings.Join(address, "|")
+	if cached, ok := r.cache[cacheKey]; ok {
+		return cached.val, cached.err
+	}
+
 	schemaList := addrToSchema(address, r.Schema)
 	if len(schemaList) == 0 {
+		r.cache[cacheKey] = cachedFieldReadResult{}
 		return FieldReadResult{}, nil
 	}
+
+	var res FieldReadResult
+	var err error
 
 	schema := schemaList[len(schemaList)-1]
 	switch schema.Type {
 	case TypeBool, TypeInt, TypeFloat, TypeString:
-		return r.readPrimitive(address, schema)
+		res, err = r.readPrimitive(address, schema)
 	case TypeList:
-		return readListField(r, address, schema)
+		res, err = readListField(r, address, schema)
 	case TypeMap:
-		return r.readMap(address, schema)
+		res, err = r.readMap(address, schema)
 	case TypeSet:
-		return r.readSet(address, schema)
+		res, err = r.readSet(address, schema)
 	case typeObject:
-		return readObjectField(r, address, schema.Elem.(map[string]*Schema))
+		res, err = readObjectField(r, address, schema.Elem.(map[string]*Schema))
 	default:
 		panic(fmt.Sprintf("Unknown type: %#v", schema.Type))
 	}
+
+	r.cache[cacheKey] = cachedFieldReadResult{
+		val: res,
+		err: err,
+	}
+	return res, err
 }
 
 func (r *DiffFieldReader) readMap(
@@ -76,7 +106,7 @@ func (r *DiffFieldReader) readMap(
 		if !strings.HasPrefix(k, prefix) {
 			continue
 		}
-		if strings.HasPrefix(k, prefix+"#") {
+		if strings.HasPrefix(k, prefix+"%") {
 			// Ignore the count field
 			continue
 		}
@@ -90,6 +120,12 @@ func (r *DiffFieldReader) readMap(
 		}
 
 		result[k] = v.New
+	}
+
+	key := address[len(address)-1]
+	err = mapValuesToPrimitive(key, result, schema)
+	if err != nil {
+		return FieldReadResult{}, nil
 	}
 
 	var resultVal interface{}
@@ -138,10 +174,13 @@ func (r *DiffFieldReader) readPrimitive(
 
 func (r *DiffFieldReader) readSet(
 	address []string, schema *Schema) (FieldReadResult, error) {
+	// copy address to ensure we don't modify the argument
+	address = append([]string(nil), address...)
+
 	prefix := strings.Join(address, ".") + "."
 
 	// Create the set that will be our result
-	set := &Set{F: schema.Set}
+	set := schema.ZeroValue().(*Set)
 
 	// Go through the map and find all the set items
 	for k, d := range r.Diff.Attributes {
@@ -183,6 +222,16 @@ func (r *DiffFieldReader) readSet(
 		// "0" to "" breaking us (if that were to happen).
 		if _, ok := r.Diff.Attributes[prefix+"#"]; ok {
 			exists = true
+		}
+	}
+
+	if !exists {
+		result, err := r.Source.ReadField(address)
+		if err != nil {
+			return FieldReadResult{}, err
+		}
+		if result.Exists {
+			return result, nil
 		}
 	}
 

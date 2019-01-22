@@ -1,12 +1,9 @@
 package command
 
 import (
-	"flag"
-	"fmt"
-	"os"
 	"strings"
 
-	"github.com/hashicorp/terraform/config/module"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
 // GetCommand is a Command implementation that takes a Terraform
@@ -18,42 +15,29 @@ type GetCommand struct {
 func (c *GetCommand) Run(args []string) int {
 	var update bool
 
-	args = c.Meta.process(args, false)
+	args, err := c.Meta.process(args, false)
+	if err != nil {
+		return 1
+	}
 
-	cmdFlags := flag.NewFlagSet("get", flag.ContinueOnError)
+	cmdFlags := c.Meta.defaultFlagSet("get")
 	cmdFlags.BoolVar(&update, "update", false, "update")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
-	var path string
-	args = cmdFlags.Args()
-	if len(args) > 1 {
-		c.Ui.Error("The get command expects one argument.\n")
-		cmdFlags.Usage()
-		return 1
-	} else if len(args) == 1 {
-		path = args[0]
-	} else {
-		var err error
-		path, err = os.Getwd()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
-		}
-	}
-
-	mode := module.GetModeGet
-	if update {
-		mode = module.GetModeUpdate
-	}
-
-	_, _, err := c.Context(contextOpts{
-		Path:    path,
-		GetMode: mode,
-	})
+	path, err := ModulePath(cmdFlags.Args())
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error loading Terraform: %s", err))
+		c.Ui.Error(err.Error())
+		return 1
+	}
+
+	path = c.normalizePath(path)
+
+	diags := getModules(&c.Meta, path, update)
+	c.showDiagnostics(diags)
+	if diags.HasErrors() {
 		return 1
 	}
 
@@ -74,10 +58,10 @@ Usage: terraform get [options] PATH
 
 Options:
 
-  -update=false       If true, modules already downloaded will be checked
-                      for updates and updated if necessary.
+  -update             Check already-downloaded modules for available updates
+                      and install the newest versions available.
 
-  -no-color           If specified, output won't contain any color.
+  -no-color           Disable text coloring in the output.
 
 `
 	return strings.TrimSpace(helpText)
@@ -85,4 +69,12 @@ Options:
 
 func (c *GetCommand) Synopsis() string {
 	return "Download and install modules for the configuration"
+}
+
+func getModules(m *Meta, path string, upgrade bool) tfdiags.Diagnostics {
+	hooks := uiModuleInstallHooks{
+		Ui:             m.Ui,
+		ShowLocalPaths: true,
+	}
+	return m.installModules(path, upgrade, hooks)
 }

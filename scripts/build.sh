@@ -16,13 +16,8 @@ GIT_DIRTY=$(test -n "`git status --porcelain`" && echo "+CHANGES" || true)
 
 # Determine the arch/os combos we're building for
 XC_ARCH=${XC_ARCH:-"386 amd64 arm"}
-XC_OS=${XC_OS:-linux darwin windows freebsd openbsd}
-
-# Get dependencies unless running in quick mode
-if [ "${TF_QUICKDEV}x" == "x" ]; then
-    echo "==> Getting dependencies..."
-    go get -d ./...
-fi
+XC_OS=${XC_OS:-linux darwin windows freebsd openbsd solaris}
+XC_EXCLUDE_OSARCH="!darwin/arm !darwin/386"
 
 # Delete the old dir
 echo "==> Removing old directory..."
@@ -36,22 +31,35 @@ if [ "${TF_DEV}x" != "x" ]; then
     XC_ARCH=$(go env GOARCH)
 fi
 
+if ! which gox > /dev/null; then
+    echo "==> Installing gox..."
+    go get -u github.com/mitchellh/gox
+fi
+
+# instruct gox to build statically linked binaries
+export CGO_ENABLED=0
+
+# Allow LD_FLAGS to be appended during development compilations
+LD_FLAGS="-X main.GitCommit=${GIT_COMMIT}${GIT_DIRTY} $LD_FLAGS"
+
+# In release mode we don't want debug information in the binary
+if [[ -n "${TF_RELEASE}" ]]; then
+    LD_FLAGS="-X main.GitCommit=${GIT_COMMIT}${GIT_DIRTY} -X github.com/hashicorp/terraform/version.Prerelease= -s -w"
+fi
+
+# Ensure all remote modules are downloaded and cached before build so that
+# the concurrent builds launched by gox won't race to redundantly download them.
+go mod download
+
 # Build!
 echo "==> Building..."
 gox \
     -os="${XC_OS}" \
     -arch="${XC_ARCH}" \
-    -ldflags "-X main.GitCommit ${GIT_COMMIT}${GIT_DIRTY}" \
-    -output "pkg/{{.OS}}_{{.Arch}}/terraform-{{.Dir}}" \
-    ./...
-
-# Make sure "terraform-terraform" is renamed properly
-for PLATFORM in $(find ./pkg -mindepth 1 -maxdepth 1 -type d); do
-    set +e
-    mv ${PLATFORM}/terraform-terraform.exe ${PLATFORM}/terraform.exe 2>/dev/null
-    mv ${PLATFORM}/terraform-terraform ${PLATFORM}/terraform 2>/dev/null
-    set -e
-done
+    -osarch="${XC_EXCLUDE_OSARCH}" \
+    -ldflags "${LD_FLAGS}" \
+    -output "pkg/{{.OS}}_{{.Arch}}/${PWD##*/}" \
+    .
 
 # Move all the compiled things to the $GOPATH/bin
 GOPATH=${GOPATH:-$(go env GOPATH)}
@@ -72,10 +80,12 @@ fi
 
 # Copy our OS/Arch to the bin/ directory
 DEV_PLATFORM="./pkg/$(go env GOOS)_$(go env GOARCH)"
-for F in $(find ${DEV_PLATFORM} -mindepth 1 -maxdepth 1 -type f); do
-    cp ${F} bin/
-    cp ${F} ${MAIN_GOPATH}/bin/
-done
+if [[ -d "${DEV_PLATFORM}" ]]; then
+    for F in $(find ${DEV_PLATFORM} -mindepth 1 -maxdepth 1 -type f); do
+        cp ${F} bin/
+        cp ${F} ${MAIN_GOPATH}/bin/
+    done
+fi
 
 if [ "${TF_DEV}x" = "x" ]; then
     # Zip and copy to the dist dir

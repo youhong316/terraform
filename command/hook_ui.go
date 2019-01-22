@@ -7,25 +7,52 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
-	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/colorstring"
+	"github.com/zclconf/go-cty/cty"
+
+	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/command/format"
+	"github.com/hashicorp/terraform/plans"
+	"github.com/hashicorp/terraform/providers"
+	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/terraform"
 )
+
+const defaultPeriodicUiTimer = 10 * time.Second
+const maxIdLen = 80
 
 type UiHook struct {
 	terraform.NilHook
 
-	Colorize *colorstring.Colorize
-	Ui       cli.Ui
+	Colorize        *colorstring.Colorize
+	Ui              cli.Ui
+	PeriodicUiTimer time.Duration
 
 	l         sync.Mutex
 	once      sync.Once
-	resources map[string]uiResourceOp
+	resources map[string]uiResourceState
 	ui        cli.Ui
 }
 
+var _ terraform.Hook = (*UiHook)(nil)
+
+// uiResourceState tracks the state of a single resource
+type uiResourceState struct {
+	DispAddr       string
+	IDKey, IDValue string
+	Op             uiResourceOp
+	Start          time.Time
+
+	DoneCh chan struct{} // To be used for cancellation
+
+	done chan struct{} // used to coordinate tests
+}
+
+// uiResourceOp is an enum for operations on a resource
 type uiResourceOp byte
 
 const (
@@ -35,34 +62,31 @@ const (
 	uiResourceDestroy
 )
 
-func (h *UiHook) PreApply(
-	n *terraform.InstanceInfo,
-	s *terraform.InstanceState,
-	d *terraform.InstanceDiff) (terraform.HookAction, error) {
+func (h *UiHook) PreApply(addr addrs.AbsResourceInstance, gen states.Generation, action plans.Action, priorState, plannedNewState cty.Value) (terraform.HookAction, error) {
 	h.once.Do(h.init)
 
-	id := n.HumanId()
-
-	op := uiResourceModify
-	if d.Destroy {
-		op = uiResourceDestroy
-	} else if s.ID == "" {
-		op = uiResourceCreate
+	dispAddr := addr.String()
+	if gen != states.CurrentGen {
+		dispAddr = fmt.Sprintf("%s (%s)", dispAddr, gen)
 	}
 
-	h.l.Lock()
-	h.resources[id] = op
-	h.l.Unlock()
-
 	var operation string
-	switch op {
-	case uiResourceModify:
-		operation = "Modifying..."
-	case uiResourceDestroy:
+	var op uiResourceOp
+	idKey, idValue := format.ObjectValueIDOrName(priorState)
+	switch action {
+	case plans.Delete:
 		operation = "Destroying..."
-	case uiResourceCreate:
+		op = uiResourceDestroy
+	case plans.Create:
 		operation = "Creating..."
-	case uiResourceUnknown:
+		op = uiResourceCreate
+	case plans.Update:
+		operation = "Modifying..."
+		op = uiResourceModify
+	default:
+		// We don't expect any other actions in here, so anything else is a
+		// bug in the caller but we'll ignore it in order to be robust.
+		h.ui.Output(fmt.Sprintf("(Unknown action %s for %s)", action, dispAddr))
 		return terraform.HookActionContinue, nil
 	}
 
@@ -71,13 +95,14 @@ func (h *UiHook) PreApply(
 	// Get all the attributes that are changing, and sort them. Also
 	// determine the longest key so that we can align them all.
 	keyLen := 0
-	keys := make([]string, 0, len(d.Attributes))
-	for key, _ := range d.Attributes {
-		// Skip the ID since we do that specially
-		if key == "id" {
-			continue
-		}
 
+	// FIXME: This is stubbed out in preparation for rewriting it to use
+	// a structural presentation rather than the old-style flatmap one.
+	// We just assume no attributes at all for now, pending new code to
+	// work with the two cty.Values we are given.
+	dAttrs := map[string]terraform.ResourceAttrDiff{}
+	keys := make([]string, 0, len(dAttrs))
+	for key, _ := range dAttrs {
 		keys = append(keys, key)
 		if len(key) > keyLen {
 			keyLen = len(key)
@@ -87,18 +112,24 @@ func (h *UiHook) PreApply(
 
 	// Go through and output each attribute
 	for _, attrK := range keys {
-		attrDiff := d.Attributes[attrK]
+		attrDiff := dAttrs[attrK]
 
 		v := attrDiff.New
+		u := attrDiff.Old
 		if attrDiff.NewComputed {
 			v = "<computed>"
+		}
+
+		if attrDiff.Sensitive {
+			u = "<sensitive>"
+			v = "<sensitive>"
 		}
 
 		attrBuf.WriteString(fmt.Sprintf(
 			"  %s:%s %#v => %#v\n",
 			attrK,
 			strings.Repeat(" ", keyLen-len(attrK)),
-			attrDiff.Old,
+			u,
 			v))
 	}
 
@@ -107,28 +138,103 @@ func (h *UiHook) PreApply(
 		attrString = "\n  " + attrString
 	}
 
+	var stateIdSuffix string
+	if idKey != "" && idValue != "" {
+		stateIdSuffix = fmt.Sprintf(" [%s=%s]", idKey, idValue)
+	} else {
+		// Make sure they are both empty so we can deal with this more
+		// easily in the other hook methods.
+		idKey = ""
+		idValue = ""
+	}
+
 	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
-		"[reset][bold]%s: %s[reset_bold]%s",
-		id,
+		"[reset][bold]%s: %s%s[reset]%s",
+		dispAddr,
 		operation,
-		attrString)))
+		stateIdSuffix,
+		attrString,
+	)))
+
+	key := addr.String()
+	uiState := uiResourceState{
+		DispAddr: key,
+		IDKey:    idKey,
+		IDValue:  idValue,
+		Op:       op,
+		Start:    time.Now().Round(time.Second),
+		DoneCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+
+	h.l.Lock()
+	h.resources[key] = uiState
+	h.l.Unlock()
+
+	// Start goroutine that shows progress
+	go h.stillApplying(uiState)
 
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) PostApply(
-	n *terraform.InstanceInfo,
-	s *terraform.InstanceState,
-	applyerr error) (terraform.HookAction, error) {
-	id := n.HumanId()
+func (h *UiHook) stillApplying(state uiResourceState) {
+	defer close(state.done)
+	for {
+		select {
+		case <-state.DoneCh:
+			return
+
+		case <-time.After(h.PeriodicUiTimer):
+			// Timer up, show status
+		}
+
+		var msg string
+		switch state.Op {
+		case uiResourceModify:
+			msg = "Still modifying..."
+		case uiResourceDestroy:
+			msg = "Still destroying..."
+		case uiResourceCreate:
+			msg = "Still creating..."
+		case uiResourceUnknown:
+			return
+		}
+
+		idSuffix := ""
+		if state.IDKey != "" {
+			idSuffix = fmt.Sprintf("%s=%s, ", state.IDKey, truncateId(state.IDValue, maxIdLen))
+		}
+
+		h.ui.Output(h.Colorize.Color(fmt.Sprintf(
+			"[reset][bold]%s: %s [%s%s elapsed][reset]",
+			state.DispAddr,
+			msg,
+			idSuffix,
+			time.Now().Round(time.Second).Sub(state.Start),
+		)))
+	}
+}
+
+func (h *UiHook) PostApply(addr addrs.AbsResourceInstance, gen states.Generation, newState cty.Value, applyerr error) (terraform.HookAction, error) {
+
+	id := addr.String()
 
 	h.l.Lock()
-	op := h.resources[id]
+	state := h.resources[id]
+	if state.DoneCh != nil {
+		close(state.DoneCh)
+	}
+
 	delete(h.resources, id)
 	h.l.Unlock()
 
+	var stateIdSuffix string
+	if k, v := format.ObjectValueID(newState); k != "" && v != "" {
+		stateIdSuffix = fmt.Sprintf(" [%s=%s]", k, v)
+	}
+
 	var msg string
-	switch op {
+	switch state.Op {
 	case uiResourceModify:
 		msg = "Modifications complete"
 	case uiResourceDestroy:
@@ -144,38 +250,32 @@ func (h *UiHook) PostApply(
 		return terraform.HookActionContinue, nil
 	}
 
+	colorized := h.Colorize.Color(fmt.Sprintf(
+		"[reset][bold]%s: %s after %s%s[reset]",
+		addr, msg, time.Now().Round(time.Second).Sub(state.Start), stateIdSuffix))
+
+	h.ui.Output(colorized)
+
+	return terraform.HookActionContinue, nil
+}
+
+func (h *UiHook) PreDiff(addr addrs.AbsResourceInstance, gen states.Generation, priorState, proposedNewState cty.Value) (terraform.HookAction, error) {
+	return terraform.HookActionContinue, nil
+}
+
+func (h *UiHook) PreProvisionInstanceStep(addr addrs.AbsResourceInstance, typeName string) (terraform.HookAction, error) {
 	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
-		"[reset][bold]%s: %s[reset_bold]",
-		id, msg)))
-
+		"[reset][bold]%s: Provisioning with '%s'...[reset]",
+		addr, typeName,
+	)))
 	return terraform.HookActionContinue, nil
 }
 
-func (h *UiHook) PreDiff(
-	n *terraform.InstanceInfo,
-	s *terraform.InstanceState) (terraform.HookAction, error) {
-	return terraform.HookActionContinue, nil
-}
-
-func (h *UiHook) PreProvision(
-	n *terraform.InstanceInfo,
-	provId string) (terraform.HookAction, error) {
-	id := n.HumanId()
-	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
-		"[reset][bold]%s: Provisioning with '%s'...[reset_bold]",
-		id, provId)))
-	return terraform.HookActionContinue, nil
-}
-
-func (h *UiHook) ProvisionOutput(
-	n *terraform.InstanceInfo,
-	provId string,
-	msg string) {
-	id := n.HumanId()
+func (h *UiHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, msg string) {
 	var buf bytes.Buffer
 	buf.WriteString(h.Colorize.Color("[reset]"))
 
-	prefix := fmt.Sprintf("%s (%s): ", id, provId)
+	prefix := fmt.Sprintf("%s (%s): ", addr, typeName)
 	s := bufio.NewScanner(strings.NewReader(msg))
 	s.Split(scanLines)
 	for s.Scan() {
@@ -188,15 +288,42 @@ func (h *UiHook) ProvisionOutput(
 	h.ui.Output(strings.TrimSpace(buf.String()))
 }
 
-func (h *UiHook) PreRefresh(
-	n *terraform.InstanceInfo,
-	s *terraform.InstanceState) (terraform.HookAction, error) {
+func (h *UiHook) PreRefresh(addr addrs.AbsResourceInstance, gen states.Generation, priorState cty.Value) (terraform.HookAction, error) {
 	h.once.Do(h.init)
 
-	id := n.HumanId()
+	var stateIdSuffix string
+	if k, v := format.ObjectValueID(priorState); k != "" && v != "" {
+		stateIdSuffix = fmt.Sprintf(" [%s=%s]", k, v)
+	}
+
 	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
-		"[reset][bold]%s: Refreshing state... (ID: %s)",
-		id, s.ID)))
+		"[reset][bold]%s: Refreshing state...%s",
+		addr, stateIdSuffix)))
+	return terraform.HookActionContinue, nil
+}
+
+func (h *UiHook) PreImportState(addr addrs.AbsResourceInstance, importID string) (terraform.HookAction, error) {
+	h.once.Do(h.init)
+
+	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
+		"[reset][bold]%s: Importing from ID %q...",
+		addr, importID,
+	)))
+	return terraform.HookActionContinue, nil
+}
+
+func (h *UiHook) PostImportState(addr addrs.AbsResourceInstance, imported []providers.ImportedResource) (terraform.HookAction, error) {
+	h.once.Do(h.init)
+
+	h.ui.Output(h.Colorize.Color(fmt.Sprintf(
+		"[reset][bold][green]%s: Import complete!", addr)))
+	for _, s := range imported {
+		h.ui.Output(h.Colorize.Color(fmt.Sprintf(
+			"[reset][green]  Imported %s",
+			s.TypeName,
+		)))
+	}
+
 	return terraform.HookActionContinue, nil
 }
 
@@ -204,8 +331,11 @@ func (h *UiHook) init() {
 	if h.Colorize == nil {
 		panic("colorize not given")
 	}
+	if h.PeriodicUiTimer == 0 {
+		h.PeriodicUiTimer = defaultPeriodicUiTimer
+	}
 
-	h.resources = make(map[string]uiResourceOp)
+	h.resources = make(map[string]uiResourceState)
 
 	// Wrap the ui so that it is safe for concurrency regardless of the
 	// underlying reader/writer that is in place.
@@ -240,4 +370,33 @@ func dropCR(data []byte) []byte {
 		return data[0 : len(data)-1]
 	}
 	return data
+}
+
+func truncateId(id string, maxLen int) string {
+	totalLength := len(id)
+	if totalLength <= maxLen {
+		return id
+	}
+	if maxLen < 5 {
+		// We don't shorten to less than 5 chars
+		// as that would be pointless with ... (3 chars)
+		maxLen = 5
+	}
+
+	dots := "..."
+	partLen := maxLen / 2
+
+	leftIdx := partLen - 1
+	leftPart := id[0:leftIdx]
+
+	rightIdx := totalLength - partLen - 1
+
+	overlap := maxLen - (partLen*2 + len(dots))
+	if overlap < 0 {
+		rightIdx -= overlap
+	}
+
+	rightPart := id[rightIdx:]
+
+	return leftPart + dots + rightPart
 }

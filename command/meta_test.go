@@ -1,13 +1,16 @@
 package command
 
 import (
-	"flag"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -20,7 +23,10 @@ func TestMetaColorize(t *testing.T) {
 	m.Color = true
 	args = []string{"foo", "bar"}
 	args2 = []string{"foo", "bar"}
-	args = m.process(args, false)
+	args, err := m.process(args, false)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 	if !reflect.DeepEqual(args, args2) {
 		t.Fatalf("bad: %#v", args)
 	}
@@ -32,7 +38,10 @@ func TestMetaColorize(t *testing.T) {
 	m = new(Meta)
 	args = []string{"foo", "bar"}
 	args2 = []string{"foo", "bar"}
-	args = m.process(args, false)
+	args, err = m.process(args, false)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 	if !reflect.DeepEqual(args, args2) {
 		t.Fatalf("bad: %#v", args)
 	}
@@ -45,7 +54,10 @@ func TestMetaColorize(t *testing.T) {
 	m.Color = true
 	args = []string{"foo", "-no-color", "bar"}
 	args2 = []string{"foo", "bar"}
-	args = m.process(args, false)
+	args, err = m.process(args, false)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 	if !reflect.DeepEqual(args, args2) {
 		t.Fatalf("bad: %#v", args)
 	}
@@ -61,7 +73,7 @@ func TestMetaInputMode(t *testing.T) {
 	m := new(Meta)
 	args := []string{}
 
-	fs := m.flagSet("foo")
+	fs := m.extendedFlagSet("foo")
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -80,7 +92,7 @@ func TestMetaInputMode_envVar(t *testing.T) {
 	m := new(Meta)
 	args := []string{}
 
-	fs := m.flagSet("foo")
+	fs := m.extendedFlagSet("foo")
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -112,7 +124,7 @@ func TestMetaInputMode_disable(t *testing.T) {
 	m := new(Meta)
 	args := []string{"-input=false"}
 
-	fs := m.flagSet("foo")
+	fs := m.extendedFlagSet("foo")
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -128,20 +140,12 @@ func TestMetaInputMode_defaultVars(t *testing.T) {
 
 	// Create a temporary directory for our cwd
 	d := tempDir(t)
-	if err := os.MkdirAll(d, 0755); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if err := os.Chdir(d); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	defer os.Chdir(cwd)
+	os.MkdirAll(d, 0755)
+	defer os.RemoveAll(d)
+	defer testChdir(t, d)()
 
 	// Create the default vars file
-	err = ioutil.WriteFile(
+	err := ioutil.WriteFile(
 		filepath.Join(d, DefaultVarsFilename),
 		[]byte(""),
 		0644)
@@ -151,9 +155,12 @@ func TestMetaInputMode_defaultVars(t *testing.T) {
 
 	m := new(Meta)
 	args := []string{}
-	args = m.process(args, true)
+	args, err = m.process(args, false)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 
-	fs := m.flagSet("foo")
+	fs := m.extendedFlagSet("foo")
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -170,12 +177,16 @@ func TestMetaInputMode_vars(t *testing.T) {
 	m := new(Meta)
 	args := []string{"-var", "foo=bar"}
 
-	fs := m.flagSet("foo")
+	fs := m.extendedFlagSet("foo")
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	if m.InputMode()&terraform.InputModeVar != 0 {
+	if m.InputMode()&terraform.InputModeVar == 0 {
+		t.Fatalf("bad: %#v", m.InputMode())
+	}
+
+	if m.InputMode()&terraform.InputModeVarUnset == 0 {
 		t.Fatalf("bad: %#v", m.InputMode())
 	}
 }
@@ -217,54 +228,139 @@ func TestMeta_initStatePaths(t *testing.T) {
 	}
 }
 
-func TestMeta_addModuleDepthFlag(t *testing.T) {
-	old := os.Getenv(ModuleDepthEnvVar)
-	defer os.Setenv(ModuleDepthEnvVar, old)
+func TestMeta_Env(t *testing.T) {
+	td := tempDir(t)
+	os.MkdirAll(td, 0755)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
 
-	cases := map[string]struct {
-		EnvVar   string
-		Args     []string
-		Expected int
+	m := new(Meta)
+
+	env := m.Workspace()
+
+	if env != backend.DefaultStateName {
+		t.Fatalf("expected env %q, got env %q", backend.DefaultStateName, env)
+	}
+
+	testEnv := "test_env"
+	if err := m.SetWorkspace(testEnv); err != nil {
+		t.Fatal("error setting env:", err)
+	}
+
+	env = m.Workspace()
+	if env != testEnv {
+		t.Fatalf("expected env %q, got env %q", testEnv, env)
+	}
+
+	if err := m.SetWorkspace(backend.DefaultStateName); err != nil {
+		t.Fatal("error setting env:", err)
+	}
+
+	env = m.Workspace()
+	if env != backend.DefaultStateName {
+		t.Fatalf("expected env %q, got env %q", backend.DefaultStateName, env)
+	}
+}
+
+func TestMeta_process(t *testing.T) {
+	test = false
+	defer func() { test = true }()
+
+	// Create a temporary directory for our cwd
+	d := tempDir(t)
+	os.MkdirAll(d, 0755)
+	defer os.RemoveAll(d)
+	defer testChdir(t, d)()
+
+	// At one point it was the responsibility of this process function to
+	// insert fake additional -var-file options into the command line
+	// if the automatic tfvars files were present. This is no longer the
+	// responsibility of process (it happens in collectVariableValues instead)
+	// but we're still testing with these files in place to verify that
+	// they _aren't_ being interpreted by process, since that could otherwise
+	// cause them to be added more than once and mess up the precedence order.
+	defaultVarsfile := "terraform.tfvars"
+	err := ioutil.WriteFile(
+		filepath.Join(d, defaultVarsfile),
+		[]byte(""),
+		0644)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	fileFirstAlphabetical := "a-file.auto.tfvars"
+	err = ioutil.WriteFile(
+		filepath.Join(d, fileFirstAlphabetical),
+		[]byte(""),
+		0644)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	fileLastAlphabetical := "z-file.auto.tfvars"
+	err = ioutil.WriteFile(
+		filepath.Join(d, fileLastAlphabetical),
+		[]byte(""),
+		0644)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	// Regular tfvars files will not be autoloaded
+	fileIgnored := "ignored.tfvars"
+	err = ioutil.WriteFile(
+		filepath.Join(d, fileIgnored),
+		[]byte(""),
+		0644)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	tests := []struct {
+		GivenArgs    []string
+		FilteredArgs []string
+		ExtraCheck   func(*testing.T, *Meta)
 	}{
-		"env var sets value when no flag present": {
-			EnvVar:   "4",
-			Args:     []string{},
-			Expected: 4,
+		{
+			[]string{},
+			[]string{},
+			func(t *testing.T, m *Meta) {
+				if got, want := m.color, true; got != want {
+					t.Errorf("wrong m.color value %#v; want %#v", got, want)
+				}
+				if got, want := m.Color, true; got != want {
+					t.Errorf("wrong m.Color value %#v; want %#v", got, want)
+				}
+			},
 		},
-		"flag overrides envvar": {
-			EnvVar:   "4",
-			Args:     []string{"-module-depth=-1"},
-			Expected: -1,
-		},
-		"negative envvar works": {
-			EnvVar:   "-1",
-			Args:     []string{},
-			Expected: -1,
-		},
-		"invalid envvar is ignored": {
-			EnvVar:   "-#",
-			Args:     []string{},
-			Expected: 0,
-		},
-		"empty envvar is okay too": {
-			EnvVar:   "",
-			Args:     []string{},
-			Expected: 0,
+		{
+			[]string{"-no-color"},
+			[]string{},
+			func(t *testing.T, m *Meta) {
+				if got, want := m.color, false; got != want {
+					t.Errorf("wrong m.color value %#v; want %#v", got, want)
+				}
+				if got, want := m.Color, false; got != want {
+					t.Errorf("wrong m.Color value %#v; want %#v", got, want)
+				}
+			},
 		},
 	}
 
-	for tn, tc := range cases {
-		m := new(Meta)
-		var moduleDepth int
-		flags := flag.NewFlagSet("test", flag.ContinueOnError)
-		os.Setenv(ModuleDepthEnvVar, tc.EnvVar)
-		m.addModuleDepthFlag(flags, &moduleDepth)
-		err := flags.Parse(tc.Args)
-		if err != nil {
-			t.Fatalf("%s: err: %#v", tn, err)
-		}
-		if moduleDepth != tc.Expected {
-			t.Fatalf("%s: expected: %#v, got: %#v", tn, tc.Expected, moduleDepth)
-		}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%s", test.GivenArgs), func(t *testing.T) {
+			m := new(Meta)
+			m.Color = true // this is the default also for normal use, overridden by -no-color
+			args := test.GivenArgs
+			args, err = m.process(args, true)
+			if err != nil {
+				t.Fatalf("err: %s", err)
+			}
+
+			if !cmp.Equal(test.FilteredArgs, args) {
+				t.Errorf("wrong filtered arguments\n%s", cmp.Diff(test.FilteredArgs, args))
+			}
+
+			if test.ExtraCheck != nil {
+				test.ExtraCheck(t, m)
+			}
+		})
 	}
 }

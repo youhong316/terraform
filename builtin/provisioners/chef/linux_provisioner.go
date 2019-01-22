@@ -10,13 +10,11 @@ import (
 )
 
 const (
-	installURL = "https://www.chef.io/chef/install.sh"
+	chmod      = "find %s -maxdepth 1 -type f -exec /bin/chmod %d {} +"
+	installURL = "https://omnitruck.chef.io/install.sh"
 )
 
-func (p *Provisioner) linuxInstallChefClient(
-	o terraform.UIOutput,
-	comm communicator.Communicator) error {
-
+func (p *provisioner) linuxInstallChefClient(o terraform.UIOutput, comm communicator.Communicator) error {
 	// Build up the command prefix
 	prefix := ""
 	if p.HTTPProxy != "" {
@@ -25,7 +23,7 @@ func (p *Provisioner) linuxInstallChefClient(
 	if p.HTTPSProxy != "" {
 		prefix += fmt.Sprintf("https_proxy='%s' ", p.HTTPSProxy)
 	}
-	if p.NOProxy != nil {
+	if len(p.NOProxy) > 0 {
 		prefix += fmt.Sprintf("no_proxy='%s' ", strings.Join(p.NOProxy, ","))
 	}
 
@@ -36,7 +34,7 @@ func (p *Provisioner) linuxInstallChefClient(
 	}
 
 	// Then execute the install.sh scrip to download and install Chef Client
-	err = p.runCommand(o, comm, fmt.Sprintf("%sbash ./install.sh -v %q", prefix, p.Version))
+	err = p.runCommand(o, comm, fmt.Sprintf("%sbash ./install.sh -v %q -c %s", prefix, p.Version, p.Channel))
 	if err != nil {
 		return err
 	}
@@ -45,9 +43,7 @@ func (p *Provisioner) linuxInstallChefClient(
 	return p.runCommand(o, comm, fmt.Sprintf("%srm -f install.sh", prefix))
 }
 
-func (p *Provisioner) linuxCreateConfigFiles(
-	o terraform.UIOutput,
-	comm communicator.Communicator) error {
+func (p *provisioner) linuxCreateConfigFiles(o terraform.UIOutput, comm communicator.Communicator) error {
 	// Make sure the config directory exists
 	if err := p.runCommand(o, comm, "mkdir -p "+linuxConfDir); err != nil {
 		return err
@@ -56,6 +52,9 @@ func (p *Provisioner) linuxCreateConfigFiles(
 	// Make sure we have enough rights to upload the files if using sudo
 	if p.useSudo {
 		if err := p.runCommand(o, comm, "chmod 777 "+linuxConfDir); err != nil {
+			return err
+		}
+		if err := p.runCommand(o, comm, fmt.Sprintf(chmod, linuxConfDir, 666)); err != nil {
 			return err
 		}
 	}
@@ -76,6 +75,9 @@ func (p *Provisioner) linuxCreateConfigFiles(
 			if err := p.runCommand(o, comm, "chmod 777 "+hintsDir); err != nil {
 				return err
 			}
+			if err := p.runCommand(o, comm, fmt.Sprintf(chmod, hintsDir, 666)); err != nil {
+				return err
+			}
 		}
 
 		if err := p.deployOhaiHints(o, comm, hintsDir); err != nil {
@@ -87,7 +89,10 @@ func (p *Provisioner) linuxCreateConfigFiles(
 			if err := p.runCommand(o, comm, "chmod 755 "+hintsDir); err != nil {
 				return err
 			}
-			if err := p.runCommand(o, comm, "chown -R root.root "+hintsDir); err != nil {
+			if err := p.runCommand(o, comm, fmt.Sprintf(chmod, hintsDir, 600)); err != nil {
+				return err
+			}
+			if err := p.runCommand(o, comm, "chown -R root:root "+hintsDir); err != nil {
 				return err
 			}
 		}
@@ -98,7 +103,10 @@ func (p *Provisioner) linuxCreateConfigFiles(
 		if err := p.runCommand(o, comm, "chmod 755 "+linuxConfDir); err != nil {
 			return err
 		}
-		if err := p.runCommand(o, comm, "chown -R root.root "+linuxConfDir); err != nil {
+		if err := p.runCommand(o, comm, fmt.Sprintf(chmod, linuxConfDir, 600)); err != nil {
+			return err
+		}
+		if err := p.runCommand(o, comm, "chown -R root:root "+linuxConfDir); err != nil {
 			return err
 		}
 	}

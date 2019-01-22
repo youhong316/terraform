@@ -2,18 +2,25 @@ package module
 
 import (
 	"io/ioutil"
-	"net/url"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/hashicorp/terraform/config"
-	urlhelper "github.com/hashicorp/terraform/helper/url"
+	"github.com/hashicorp/terraform/svchost/disco"
 )
+
+func init() {
+	if os.Getenv("TF_LOG") == "" {
+		log.SetOutput(ioutil.Discard)
+	}
+}
 
 const fixtureDir = "./test-fixtures"
 
 func tempDir(t *testing.T) string {
+	t.Helper()
 	dir, err := ioutil.TempDir("", "tf")
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -26,6 +33,7 @@ func tempDir(t *testing.T) string {
 }
 
 func testConfig(t *testing.T, n string) *config.Config {
+	t.Helper()
 	c, err := config.LoadDir(filepath.Join(fixtureDir, n))
 	if err != nil {
 		t.Fatalf("err: %s", err)
@@ -34,24 +42,7 @@ func testConfig(t *testing.T, n string) *config.Config {
 	return c
 }
 
-func testModule(n string) string {
-	p := filepath.Join(fixtureDir, n)
-	p, err := filepath.Abs(p)
-	if err != nil {
-		panic(err)
-	}
-	return fmtFileURL(p)
-}
-
-func testModuleURL(n string) *url.URL {
-	u, err := urlhelper.Parse(testModule(n))
-	if err != nil {
-		panic(err)
-	}
-
-	return u
-}
-
-func testStorage(t *testing.T) Storage {
-	return &FolderStorage{StorageDir: tempDir(t)}
+func testStorage(t *testing.T, d *disco.Disco) *Storage {
+	t.Helper()
+	return NewStorage(tempDir(t), d)
 }

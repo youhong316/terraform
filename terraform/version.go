@@ -1,9 +1,10 @@
 package terraform
 
-// The main version number that is being run at the moment.
-const Version = "0.6.4"
+import (
+	"github.com/hashicorp/terraform/version"
+)
 
-// A pre-release marker for the version. If this is "" (empty string)
-// then it means that it is a final release. Otherwise, this is a pre-release
-// such as "dev" (in development), "beta", "rc1", etc.
-const VersionPrerelease = "dev"
+// TODO: update providers to use the version package directly
+func VersionString() string {
+	return version.String()
+}

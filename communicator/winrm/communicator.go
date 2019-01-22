@@ -11,11 +11,8 @@ import (
 
 	"github.com/hashicorp/terraform/communicator/remote"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/masterzen/winrm/winrm"
+	"github.com/masterzen/winrm"
 	"github.com/packer-community/winrmcp/winrmcp"
-
-	// This import is a bit strange, but it's needed so `make updatedeps` can see and download it
-	_ "github.com/dylanmei/winrmtest"
 )
 
 // Communicator represents the WinRM communicator
@@ -23,6 +20,7 @@ type Communicator struct {
 	connInfo *connectionInfo
 	client   *winrm.Client
 	endpoint *winrm.Endpoint
+	rand     *rand.Rand
 }
 
 // New creates a new communicator implementation over WinRM.
@@ -37,12 +35,16 @@ func New(s *terraform.InstanceState) (*Communicator, error) {
 		Port:     connInfo.Port,
 		HTTPS:    connInfo.HTTPS,
 		Insecure: connInfo.Insecure,
-		CACert:   connInfo.CACert,
+	}
+	if len(connInfo.CACert) > 0 {
+		endpoint.CACert = []byte(connInfo.CACert)
 	}
 
 	comm := &Communicator{
 		connInfo: connInfo,
 		endpoint: endpoint,
+		// Seed our own rand source so that script paths are not deterministic
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	return comm, nil
@@ -54,8 +56,11 @@ func (c *Communicator) Connect(o terraform.UIOutput) error {
 		return nil
 	}
 
-	params := winrm.DefaultParameters()
+	params := winrm.DefaultParameters
 	params.Timeout = formatDuration(c.Timeout())
+	if c.connInfo.NTLM == true {
+		params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
+	}
 
 	client, err := winrm.NewClientWithParameters(
 		c.endpoint, c.connInfo.User, c.connInfo.Password, params)
@@ -72,6 +77,7 @@ func (c *Communicator) Connect(o terraform.UIOutput) error {
 				"  Password: %t\n"+
 				"  HTTPS: %t\n"+
 				"  Insecure: %t\n"+
+				"  NTLM: %t\n"+
 				"  CACert: %t",
 			c.connInfo.Host,
 			c.connInfo.Port,
@@ -79,20 +85,21 @@ func (c *Communicator) Connect(o terraform.UIOutput) error {
 			c.connInfo.Password != "",
 			c.connInfo.HTTPS,
 			c.connInfo.Insecure,
-			c.connInfo.CACert != nil,
+			c.connInfo.NTLM,
+			c.connInfo.CACert != "",
 		))
 	}
 
-	log.Printf("connecting to remote shell using WinRM")
+	log.Printf("[DEBUG] connecting to remote shell using WinRM")
 	shell, err := client.CreateShell()
 	if err != nil {
-		log.Printf("connection error: %s", err)
+		log.Printf("[ERROR] error creating shell: %s", err)
 		return err
 	}
 
 	err = shell.Close()
 	if err != nil {
-		log.Printf("error closing connection: %s", err)
+		log.Printf("[ERROR] error closing shell: %s", err)
 		return err
 	}
 
@@ -120,39 +127,27 @@ func (c *Communicator) Timeout() time.Duration {
 func (c *Communicator) ScriptPath() string {
 	return strings.Replace(
 		c.connInfo.ScriptPath, "%RAND%",
-		strconv.FormatInt(int64(rand.Int31()), 10), -1)
+		strconv.FormatInt(int64(c.rand.Int31()), 10), -1)
 }
 
 // Start implementation of communicator.Communicator interface
 func (c *Communicator) Start(rc *remote.Cmd) error {
-	err := c.Connect(nil)
-	if err != nil {
-		return err
+	rc.Init()
+	log.Printf("[DEBUG] starting remote command: %s", rc.Command)
+
+	// TODO: make sure communicators always connect first, so we can get output
+	// from the connection.
+	if c.client == nil {
+		log.Println("[WARN] winrm client not connected, attempting to connect")
+		if err := c.Connect(nil); err != nil {
+			return err
+		}
 	}
 
-	shell, err := c.client.CreateShell()
-	if err != nil {
-		return err
-	}
+	status, err := c.client.Run(rc.Command, rc.Stdout, rc.Stderr)
+	rc.SetExitStatus(status, err)
 
-	log.Printf("starting remote command: %s", rc.Command)
-	cmd, err := shell.Execute(rc.Command)
-	if err != nil {
-		return err
-	}
-
-	go runCommand(shell, cmd, rc)
 	return nil
-}
-
-func runCommand(shell *winrm.Shell, cmd *winrm.Command, rc *remote.Cmd) {
-	defer shell.Close()
-
-	go io.Copy(rc.Stdout, cmd.Stdout)
-	go io.Copy(rc.Stderr, cmd.Stderr)
-
-	cmd.Wait()
-	rc.SetExited(cmd.ExitCode())
 }
 
 // Upload implementation of communicator.Communicator interface
@@ -161,7 +156,7 @@ func (c *Communicator) Upload(path string, input io.Reader) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Uploading file to '%s'", path)
+	log.Printf("[DEBUG] Uploading file to '%s'", path)
 	return wcp.Write(path, input)
 }
 
@@ -172,7 +167,7 @@ func (c *Communicator) UploadScript(path string, input io.Reader) error {
 
 // UploadDir implementation of communicator.Communicator interface
 func (c *Communicator) UploadDir(dst string, src string) error {
-	log.Printf("Uploading dir '%s' to '%s'", src, dst)
+	log.Printf("[DEBUG] Uploading dir '%s' to '%s'", src, dst)
 	wcp, err := c.newCopyClient()
 	if err != nil {
 		return err
@@ -182,12 +177,25 @@ func (c *Communicator) UploadDir(dst string, src string) error {
 
 func (c *Communicator) newCopyClient() (*winrmcp.Winrmcp, error) {
 	addr := fmt.Sprintf("%s:%d", c.endpoint.Host, c.endpoint.Port)
-	return winrmcp.New(addr, &winrmcp.Config{
+
+	config := winrmcp.Config{
 		Auth: winrmcp.Auth{
 			User:     c.connInfo.User,
 			Password: c.connInfo.Password,
 		},
+		Https:                 c.connInfo.HTTPS,
+		Insecure:              c.connInfo.Insecure,
 		OperationTimeout:      c.Timeout(),
 		MaxOperationsPerShell: 15, // lowest common denominator
-	})
+	}
+
+	if c.connInfo.NTLM == true {
+		config.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
+	}
+
+	if c.connInfo.CACert != "" {
+		config.CACertBytes = []byte(c.connInfo.CACert)
+	}
+
+	return winrmcp.New(addr, &config)
 }

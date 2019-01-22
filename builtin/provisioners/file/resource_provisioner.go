@@ -1,73 +1,118 @@
 package file
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"os"
-	"time"
 
 	"github.com/hashicorp/terraform/communicator"
-	"github.com/hashicorp/terraform/helper/config"
+	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/go-homedir"
 )
 
-// ResourceProvisioner represents a file provisioner
-type ResourceProvisioner struct{}
+func Provisioner() terraform.ResourceProvisioner {
+	return &schema.Provisioner{
+		Schema: map[string]*schema.Schema{
+			"source": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"content"},
+			},
 
-// Apply executes the file provisioner
-func (p *ResourceProvisioner) Apply(
-	o terraform.UIOutput,
-	s *terraform.InstanceState,
-	c *terraform.ResourceConfig) error {
-	// Get a new communicator
-	comm, err := communicator.New(s)
-	if err != nil {
-		return err
-	}
+			"content": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"source"},
+			},
 
-	// Get the source and destination
-	sRaw := c.Config["source"]
-	src, ok := sRaw.(string)
-	if !ok {
-		return fmt.Errorf("Unsupported 'source' type! Must be string.")
-	}
+			"destination": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+			},
+		},
 
-	src, err = homedir.Expand(src)
-	if err != nil {
-		return err
+		ApplyFunc:    applyFn,
+		ValidateFunc: validateFn,
 	}
-
-	dRaw := c.Config["destination"]
-	dst, ok := dRaw.(string)
-	if !ok {
-		return fmt.Errorf("Unsupported 'destination' type! Must be string.")
-	}
-	return p.copyFiles(comm, src, dst)
 }
 
-// Validate checks if the required arguments are configured
-func (p *ResourceProvisioner) Validate(c *terraform.ResourceConfig) (ws []string, es []error) {
-	v := &config.Validator{
-		Required: []string{
-			"source",
-			"destination",
-		},
+func applyFn(ctx context.Context) error {
+	connState := ctx.Value(schema.ProvRawStateKey).(*terraform.InstanceState)
+	data := ctx.Value(schema.ProvConfigDataKey).(*schema.ResourceData)
+
+	// Get a new communicator
+	comm, err := communicator.New(connState)
+	if err != nil {
+		return err
 	}
-	return v.Validate(c)
+
+	// Get the source
+	src, deleteSource, err := getSrc(data)
+	if err != nil {
+		return err
+	}
+	if deleteSource {
+		defer os.Remove(src)
+	}
+
+	// Begin the file copy
+	dst := data.Get("destination").(string)
+
+	if err := copyFiles(ctx, comm, src, dst); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFn(c *terraform.ResourceConfig) (ws []string, es []error) {
+	if !c.IsSet("source") && !c.IsSet("content") {
+		es = append(es, fmt.Errorf("Must provide one of 'source' or 'content'"))
+	}
+
+	return ws, es
+}
+
+// getSrc returns the file to use as source
+func getSrc(data *schema.ResourceData) (string, bool, error) {
+	src := data.Get("source").(string)
+	if content, ok := data.GetOk("content"); ok {
+		file, err := ioutil.TempFile("", "tf-file-content")
+		if err != nil {
+			return "", true, err
+		}
+
+		if _, err = file.WriteString(content.(string)); err != nil {
+			return "", true, err
+		}
+
+		return file.Name(), true, nil
+	}
+
+	expansion, err := homedir.Expand(src)
+	return expansion, false, err
 }
 
 // copyFiles is used to copy the files from a source to a destination
-func (p *ResourceProvisioner) copyFiles(comm communicator.Communicator, src, dst string) error {
+func copyFiles(ctx context.Context, comm communicator.Communicator, src, dst string) error {
+	retryCtx, cancel := context.WithTimeout(ctx, comm.Timeout())
+	defer cancel()
+
 	// Wait and retry until we establish the connection
-	err := retryFunc(comm.Timeout(), func() error {
-		err := comm.Connect(nil)
-		return err
+	err := communicator.Retry(retryCtx, func() error {
+		return comm.Connect(nil)
 	})
 	if err != nil {
 		return err
 	}
-	defer comm.Disconnect()
+
+	// disconnect when the context is canceled, which will close this after
+	// Apply as well.
+	go func() {
+		<-ctx.Done()
+		comm.Disconnect()
+	}()
 
 	info, err := os.Stat(src)
 	if err != nil {
@@ -94,22 +139,4 @@ func (p *ResourceProvisioner) copyFiles(comm communicator.Communicator, src, dst
 		return fmt.Errorf("Upload failed: %v", err)
 	}
 	return err
-}
-
-// retryFunc is used to retry a function for a given duration
-func retryFunc(timeout time.Duration, f func() error) error {
-	finish := time.After(timeout)
-	for {
-		err := f()
-		if err == nil {
-			return nil
-		}
-		log.Printf("Retryable error: %v", err)
-
-		select {
-		case <-finish:
-			return err
-		case <-time.After(3 * time.Second):
-		}
-	}
 }

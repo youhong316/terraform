@@ -3,15 +3,26 @@ package terraform
 import (
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/terraform/addrs"
 )
 
 func TestRootTransformer(t *testing.T) {
 	mod := testModule(t, "transform-root-basic")
 
-	g := Graph{Path: RootModulePath}
+	g := Graph{Path: addrs.RootModuleInstance}
 	{
-		tf := &ConfigTransformer{Module: mod}
+		tf := &ConfigTransformer{Config: mod}
 		if err := tf.Transform(&g); err != nil {
+			t.Fatalf("err: %s", err)
+		}
+	}
+
+	{
+		transform := &MissingProviderTransformer{
+			Providers: []string{"aws", "do"},
+		}
+		if err := transform.Transform(&g); err != nil {
 			t.Fatalf("err: %s", err)
 		}
 	}
@@ -33,7 +44,7 @@ func TestRootTransformer(t *testing.T) {
 	actual := strings.TrimSpace(g.String())
 	expected := strings.TrimSpace(testTransformRootBasicStr)
 	if actual != expected {
-		t.Fatalf("bad:\n\n%s", actual)
+		t.Fatalf("wrong result\n\ngot:\n%s\n\nwant:\n%s", actual, expected)
 	}
 
 	root, err := g.Root()

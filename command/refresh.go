@@ -2,9 +2,11 @@ package command
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"strings"
+
+	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
 // RefreshCommand is a cli.Command implementation that refreshes the state
@@ -14,102 +16,95 @@ type RefreshCommand struct {
 }
 
 func (c *RefreshCommand) Run(args []string) int {
-	args = c.Meta.process(args, true)
+	args, err := c.Meta.process(args, true)
+	if err != nil {
+		return 1
+	}
 
-	cmdFlags := c.Meta.flagSet("refresh")
+	cmdFlags := c.Meta.extendedFlagSet("refresh")
 	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
+	cmdFlags.IntVar(&c.Meta.parallelism, "parallelism", 0, "parallelism")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
-	var configPath string
-	args = cmdFlags.Args()
-	if len(args) > 1 {
-		c.Ui.Error("The refresh command expects at most one argument.")
-		cmdFlags.Usage()
-		return 1
-	} else if len(args) == 1 {
-		configPath = args[0]
-	} else {
-		var err error
-		configPath, err = os.Getwd()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
-		}
-	}
-
-	// Check if remote state is enabled
-	state, err := c.State()
-	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Failed to load state: %s", err))
-		return 1
-	}
-
-	// Verify that the state path exists. The "ContextArg" function below
-	// will actually do this, but we want to provide a richer error message
-	// if possible.
-	if !state.State().IsRemote() {
-		if _, err := os.Stat(c.Meta.statePath); err != nil {
-			if os.IsNotExist(err) {
-				c.Ui.Error(fmt.Sprintf(
-					"The Terraform state file for your infrastructure does not\n"+
-						"exist. The 'refresh' command only works and only makes sense\n"+
-						"when there is existing state that Terraform is managing. Please\n"+
-						"double-check the value given below and try again. If you\n"+
-						"haven't created infrastructure with Terraform yet, use the\n"+
-						"'terraform apply' command.\n\n"+
-						"Path: %s",
-					c.Meta.statePath))
-				return 1
-			}
-
-			c.Ui.Error(fmt.Sprintf(
-				"There was an error reading the Terraform state that is needed\n"+
-					"for refreshing. The path and error are shown below.\n\n"+
-					"Path: %s\n\nError: %s",
-				c.Meta.statePath,
-				err))
-			return 1
-		}
-	}
-
-	// Build the context based on the arguments given
-	ctx, _, err := c.Context(contextOpts{
-		Path:      configPath,
-		StatePath: c.Meta.statePath,
-	})
+	configPath, err := ModulePath(cmdFlags.Args())
 	if err != nil {
 		c.Ui.Error(err.Error())
 		return 1
 	}
-	if !validateContext(ctx, c.Ui) {
-		return 1
-	}
-	if err := ctx.Input(c.InputMode()); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error configuring: %s", err))
+
+	var diags tfdiags.Diagnostics
+
+	// Check for user-supplied plugin path
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
 		return 1
 	}
 
-	newState, err := ctx.Refresh()
+	backendConfig, configDiags := c.loadBackendConfig(configPath)
+	diags = diags.Append(configDiags)
+	if configDiags.HasErrors() {
+		c.showDiagnostics(diags)
+		return 1
+	}
+
+	// Load the backend
+	b, backendDiags := c.Backend(&BackendOpts{
+		Config: backendConfig,
+	})
+	diags = diags.Append(backendDiags)
+	if backendDiags.HasErrors() {
+		c.showDiagnostics(diags)
+		return 1
+	}
+
+	// Before we delegate to the backend, we'll print any warning diagnostics
+	// we've accumulated here, since the backend will start fresh with its own
+	// diagnostics.
+	c.showDiagnostics(diags)
+	diags = nil
+
+	// Build the operation
+	opReq := c.Operation(b)
+	opReq.ConfigDir = configPath
+	opReq.Type = backend.OperationTypeRefresh
+
+	opReq.ConfigLoader, err = c.initConfigLoader()
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error refreshing state: %s", err))
+		c.showDiagnostics(err)
 		return 1
 	}
 
-	log.Printf("[INFO] Writing state output to: %s", c.Meta.StateOutPath())
-	if err := c.Meta.PersistState(newState); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error writing state file: %s", err))
-		return 1
+	{
+		var moreDiags tfdiags.Diagnostics
+		opReq.Variables, moreDiags = c.collectVariableValues()
+		diags = diags.Append(moreDiags)
+		if moreDiags.HasErrors() {
+			c.showDiagnostics(diags)
+			return 1
+		}
 	}
 
-	if outputs := outputsAsString(newState); outputs != "" {
+	op, err := c.RunOperation(b, opReq)
+	if err != nil {
+		c.showDiagnostics(err)
+		return 1
+	}
+	if op.Result != backend.OperationSuccess {
+		return op.Result.ExitStatus()
+	}
+
+	if outputs := outputsAsString(op.State, addrs.RootModuleInstance, true); outputs != "" {
 		c.Ui.Output(c.Colorize().Color(outputs))
 	}
 
-	return 0
+	return op.Result.ExitStatus()
 }
 
 func (c *RefreshCommand) Help() string {
@@ -131,6 +126,10 @@ Options:
 
   -input=true         Ask for input for variables if not directly set.
 
+  -lock=true          Lock the state file when locking is supported.
+
+  -lock-timeout=0s    Duration to retry a state lock.
+
   -no-color           If specified, output won't contain any color.
 
   -state=path         Path to read and save state (unless state-out
@@ -147,8 +146,8 @@ Options:
                       flag can be set multiple times.
 
   -var-file=foo       Set variables in the Terraform configuration from
-                      a file. If "terraform.tfvars" is present, it will be
-                      automatically loaded if this flag is not specified.
+                      a file. If "terraform.tfvars" or any ".auto.tfvars"
+                      files are present, they will be automatically loaded.
 
 `
 	return strings.TrimSpace(helpText)
